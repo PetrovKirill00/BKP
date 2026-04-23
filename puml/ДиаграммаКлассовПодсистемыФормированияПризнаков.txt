@@ -1,0 +1,139 @@
+@startuml
+title UML-диаграмма классов подсистемы формирования признаков
+
+top to bottom direction
+skinparam shadowing false
+skinparam classAttributeIconSize 0
+skinparam linetype ortho
+skinparam nodesep 30
+skinparam ranksep 35
+
+class "Подготовленные минутные данные" as PreparedMinuteDataset {
+  + records
+}
+
+class "Вектор признаков" as FeatureVector {
+  + features
+}
+
+class "Конвейер формирования признаков" as FeatureEngineeringPipeline {
+  + build_features(data): FeatureVector
+}
+
+class "Построитель базовых временных признаков" as BasicTimeFeatureBuilder {
+  + add_basic_time_features(data): FeatureVector
+}
+
+class "Построитель циклических временных признаков" as CyclicTimeFeatureBuilder {
+  + add_cyclic_time_features(data): FeatureVector
+}
+
+class "Построитель лагов доходности" as ReturnLagBuilder {
+  + add_return_lags(data): FeatureVector
+}
+
+class "Построитель объёмных признаков" as VolumeFeatureBuilder {
+  + add_log_volume_features(data): FeatureVector
+  + add_log_value_features(data): FeatureVector
+  + add_volume_diff_features(data): FeatureVector
+}
+
+class "Построитель скользящих характеристик" as RollingFeatureBuilder {
+  + add_moving_average_features(data): FeatureVector
+  + add_close_to_ma_features(data): FeatureVector
+}
+
+class "Построитель признаков изменчивости" as VolatilityFeatureBuilder {
+  + add_volatility_features(data): FeatureVector
+}
+
+class "Построитель признаков геометрии свечи" as CandleShapeFeatureBuilder {
+  + add_candle_shape_features(data): FeatureVector
+}
+
+PreparedMinuteDataset --> FeatureEngineeringPipeline : входные данные
+FeatureEngineeringPipeline --> FeatureVector : формирует
+
+FeatureEngineeringPipeline ..> BasicTimeFeatureBuilder : использует
+FeatureEngineeringPipeline ..> CyclicTimeFeatureBuilder : использует
+FeatureEngineeringPipeline ..> ReturnLagBuilder : использует
+FeatureEngineeringPipeline ..> VolumeFeatureBuilder : использует
+FeatureEngineeringPipeline ..> RollingFeatureBuilder : использует
+FeatureEngineeringPipeline ..> VolatilityFeatureBuilder : использует
+FeatureEngineeringPipeline ..> CandleShapeFeatureBuilder : использует
+
+BasicTimeFeatureBuilder -[hidden]down-> CyclicTimeFeatureBuilder
+CyclicTimeFeatureBuilder -[hidden]down-> ReturnLagBuilder
+ReturnLagBuilder -[hidden]down-> VolumeFeatureBuilder
+VolumeFeatureBuilder -[hidden]down-> RollingFeatureBuilder
+RollingFeatureBuilder -[hidden]down-> VolatilityFeatureBuilder
+VolatilityFeatureBuilder -[hidden]down-> CandleShapeFeatureBuilder
+
+note bottom of BasicTimeFeatureBuilder
+Базовые временные признаки:
+- hour
+- minute
+- minute_from_midnight
+- day_of_week
+- day_of_month
+- month
+- days_in_month
+- is_month_start
+- is_month_end
+end note
+
+note bottom of CyclicTimeFeatureBuilder
+Циклические признаки:
+- hour_sin, hour_cos
+- minute_sin, minute_cos
+- minute_from_midnight_sin, minute_from_midnight_cos
+- day_of_week_sin, day_of_week_cos
+- month_sin, month_cos
+- day_of_month_sin, day_of_month_cos
+end note
+
+note bottom of ReturnLagBuilder
+Лаги доходности:
+- return_1
+- return_2
+- return_3
+- return_5
+- return_10
+- return_15
+- return_30
+end note
+
+note bottom of VolumeFeatureBuilder
+Объёмные признаки:
+- log_volume
+- log_value
+- log_volume_diff_1
+- log_value_diff_1
+- log_volume_ma_5
+- log_value_ma_5
+end note
+
+note bottom of RollingFeatureBuilder
+Скользящие характеристики:
+- ma_close_5
+- ma_close_15
+- ma_close_30
+- close_to_ma_5
+- close_to_ma_15
+end note
+
+note bottom of VolatilityFeatureBuilder
+Признаки изменчивости:
+- volatility_5
+- volatility_15
+- hl_range
+end note
+
+note bottom of CandleShapeFeatureBuilder
+Геометрия свечи:
+- body
+- upper_wick
+- lower_wick
+end note
+
+@enduml

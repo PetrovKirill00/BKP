@@ -1,0 +1,51 @@
+@startuml
+title UML-Диаграмма потоков данных системы алгоритмического трейдинга
+
+top to bottom direction
+skinparam shadowing false
+skinparam linetype ortho
+skinparam nodesep 60
+skinparam ranksep 70
+skinparam defaultTextAlignment center
+
+rectangle "Процесс 1.\nПолучение минутных данных" as P1
+rectangle "Процесс 2.\nПредварительная обработка" as P2
+rectangle "Процесс 3.\nФормирование признаков" as P3
+rectangle "Процесс 4.\nПрогнозирование" as P4
+rectangle "Процесс 5.\nПринятие торговых решений" as P5
+rectangle "Процесс 6.\nИсторическое тестирование" as P6
+rectangle "Процесс 7.\nОценка результатов" as P7
+
+database "Хранилище\nпараметров стратегии" as D1
+database "Хранилище\nсостояния портфеля" as D2
+
+P1 --> P2 : минутные данные\nOHLCV, объём, оборот
+P2 --> P3 : подготовленные данные
+P3 --> P4 : набор признаков
+P4 --> P5 : прогноз доходности
+D1 --> P5 : параметры стратегии
+D2 --> P5 : состояние портфеля
+P5 --> P6 : торговые решения
+P6 --> D2 : обновлённое состояние портфеля
+P6 --> P7 : результаты тестирования
+
+note right of D1
+пороги входа и выхода
+лимиты
+комиссия
+спред
+end note
+
+note right of D2
+денежные средства
+открытые позиции
+история сделок
+end note
+
+note right of P7
+прибыль и убыток
+максимальная просадка
+оборот
+число сделок
+end note
+@enduml

@@ -1,0 +1,107 @@
+@startuml
+title UML-диаграмма компонентов системы алгоритмического трейдинга
+
+top to bottom direction
+skinparam componentStyle uml2
+skinparam shadowing false
+skinparam linetype ortho
+skinparam nodesep 60
+skinparam ranksep 70
+skinparam noteBackgroundColor #FFFDE7
+skinparam noteBorderColor #888888
+
+component "Источник минутных\nданных" as Data
+component "Компонент\nпредварительной обработки" as Prep
+component "Компонент\nформирования признаков" as Feat
+component "Подсистема\nпрогнозирования" as Model
+component "Модуль принятия\nрешений" as Decision
+component "Компонент исторического\nтестирования" as Backtest
+component "Компонент оценки\nрезультатов" as Metrics
+
+component "Хранилище состояния\nпортфеля" as State
+component "Хранилище параметров\nстратегии" as Params
+
+' Основной вертикальный контур
+Data --> Prep : минутные данные
+Prep --> Feat : подготовленные данные
+Feat --> Model : набор признаков
+Model --> Decision : прогноз доходности
+Decision --> Backtest : торговые решения
+Backtest --> Metrics : результаты тестирования
+
+' Вспомогательные входы в модуль принятия решений
+State --> Decision : состояние портфеля
+Params --> Decision : параметры стратегии
+
+' Компоновка
+Data -[hidden]down-> Prep
+Prep -[hidden]down-> Feat
+Feat -[hidden]down-> Model
+Model -[hidden]down-> Decision
+Decision -[hidden]down-> Backtest
+Backtest -[hidden]down-> Metrics
+
+State -[hidden]-> Params
+Feat -[hidden]down-> State
+State -[hidden]right-> Decision
+Params -[hidden]right-> Decision
+
+note right of Data
+OHLCV
+объём в штуках
+денежный оборот
+end note
+
+note right of Prep
+синхронизация
+очистка
+нормализация
+end note
+
+note right of Feat
+лаги доходности
+признаки объёма
+скользящие характеристики
+end note
+
+note right of Model
+наивная модель
+линейная регрессия
+GRU
+1D CNN
+трансформер
+end note
+
+note right of Decision
+купить
+продать
+удерживать
+end note
+
+note right of Backtest
+пошаговая временная валидация
+последовательная симуляция
+end note
+
+note right of Metrics
+PnL
+максимальная просадка
+оборот
+число сделок
+end note
+
+note bottom of State
+денежные средства
+открытые позиции
+история сделок
+end note
+
+note bottom of Params
+порог входа
+порог выхода
+лимит позиции
+лимит числа бумаг
+комиссия и спред
+end note
+
+@enduml

@@ -1,0 +1,30 @@
+@startuml
+title UML-диаграмма компонентов системы алгоритмического трейдинга
+
+top to bottom direction
+skinparam componentStyle uml2
+skinparam shadowing false
+skinparam linetype ortho
+skinparam nodesep 50
+skinparam ranksep 60
+
+component "Источник минутных данных" as DataSource
+component "Подсистема предварительной обработки" as Preprocessing
+component "Подсистема формирования признаков" as FeatureEngineering
+component "Подсистема прогнозирования" as Forecasting
+component "Хранилище состояния портфеля" as PortfolioState
+component "Хранилище параметров стратегии" as StrategyParams
+component "Модуль принятия решений" as DecisionModule
+component "Компонент исторического тестирования" as Backtesting
+component "Компонент оценки результатов" as Evaluation
+
+DataSource --> Preprocessing
+Preprocessing --> FeatureEngineering
+FeatureEngineering --> Forecasting
+Forecasting --> DecisionModule
+PortfolioState --> DecisionModule
+StrategyParams --> DecisionModule
+DecisionModule --> Backtesting
+Backtesting --> Evaluation
+
+@enduml

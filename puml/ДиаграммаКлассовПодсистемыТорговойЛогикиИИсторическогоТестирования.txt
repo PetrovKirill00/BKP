@@ -1,0 +1,98 @@
+@startuml
+title UML-диаграмма классов подсистемы торговой логики и исторического тестирования
+
+skinparam shadowing false
+skinparam classAttributeIconSize 0
+skinparam linetype ortho
+skinparam nodesep 35
+skinparam ranksep 45
+
+class "Параметры стратегии" as StrategyParameters {
+  - entry_threshold: float
+  - exit_threshold: float
+  - position_limit: float
+  - max_positions: int
+  - commission: float
+  - spread: float
+  - stop_loss: float
+  - take_profit: float
+  - max_holding_time: int
+}
+
+enum "Тип сигнала" as SignalType {
+  BUY
+  SELL
+  HOLD
+}
+
+class "Торговый сигнал" as TradeSignal {
+  - action: SignalType
+  - timestamp: datetime
+}
+
+class "Позиция" as Position {
+  - instrument: str
+  - quantity: int
+  - entry_price: float
+  - entry_time: datetime
+}
+
+class "Сделка" as Trade {
+  - side: SignalType
+  - instrument: str
+  - price: float
+  - quantity: int
+  - time: datetime
+  - commission: float
+}
+
+class "Портфель" as Portfolio {
+  - cash: float
+  + open_position(...)
+  + close_position(...)
+  + update_cash(...)
+}
+
+class "Модуль принятия решений" as DecisionModule {
+  + generate_signal(forecast, portfolio, params): TradeSignal
+  + check_entry(...): bool
+  + check_exit(...): bool
+}
+
+class "Движок исторического тестирования" as BacktestEngine {
+  + run()
+  + step()
+  + execute_trade(signal)
+}
+
+class "Вычислитель метрик" as MetricsCalculator {
+  + calculate_pnl(...)
+  + calculate_drawdown(...)
+  + calculate_turnover(...)
+  + calculate_num_trades(...)
+}
+
+class "Отчёт по метрикам" as MetricsReport {
+  - pnl: float
+  - max_drawdown: float
+  - turnover: float
+  - num_trades: int
+}
+
+TradeSignal --> SignalType
+Trade --> SignalType
+
+Portfolio *-- Position
+Portfolio *-- Trade
+
+DecisionModule ..> Portfolio : использует
+DecisionModule ..> StrategyParameters : использует
+DecisionModule ..> TradeSignal : формирует
+
+BacktestEngine ..> DecisionModule : вызывает
+BacktestEngine ..> Portfolio : обновляет
+BacktestEngine ..> MetricsCalculator : использует
+
+MetricsCalculator ..> MetricsReport : формирует
+
+@enduml
