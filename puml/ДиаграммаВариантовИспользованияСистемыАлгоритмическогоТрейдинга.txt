@@ -1,0 +1,35 @@
+@startuml
+title Диаграмма вариантов использования системы алгоритмического трейдинга
+
+left to right direction
+skinparam shadowing false
+skinparam packageStyle rectangle
+skinparam usecaseBorderColor black
+skinparam usecaseBackgroundColor white
+skinparam actorStyle awesome
+
+actor "Разработчик\nсистемы" as Developer
+actor "Источник исторических данных\nМосковской биржи" as MOEX
+
+rectangle "Система алгоритмического трейдинга" {
+  usecase "Получить исторические\nрыночные данные" as UC1
+  usecase "Подготовить данные" as UC2
+  usecase "Сформировать\nпризнаки" as UC3
+  usecase "Обучить модели\nпрогнозирования" as UC4
+  usecase "Выполнить историческое\nтестирование" as UC5
+  usecase "Оценить результаты" as UC6
+  usecase "Сравнить модели" as UC7
+  usecase "Подготовить таблицы,\nграфики и выводы" as UC8
+}
+
+MOEX --> UC1
+
+Developer --> UC1
+Developer --> UC2
+Developer --> UC3
+Developer --> UC4
+Developer --> UC5
+Developer --> UC6
+Developer --> UC7
+Developer --> UC8
+@enduml

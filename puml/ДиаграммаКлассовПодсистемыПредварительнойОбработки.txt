@@ -5,110 +5,109 @@ top to bottom direction
 skinparam shadowing false
 skinparam classAttributeIconSize 0
 skinparam linetype ortho
-skinparam nodesep 30
-skinparam ranksep 35
+skinparam nodesep 22
+skinparam ranksep 22
+
+class "Загрузчик данных" as DataLoader {
+  +load_bars(): List<MinuteBar>
+  +load_liquid_stocks(): List<Instrument>
+  +parse_response(raw_data): RawMinuteDataset
+}
 
 class "Инструмент" as Instrument {
-  - secid: str
-  - name: str
+  -secid: str
+  -name: str
+  -is_liquid: bool
 }
 
 class "Минутная свеча" as MinuteBar {
-  - begin: datetime
-  - end: datetime
-  - open: float
-  - high: float
-  - low: float
-  - close: float
-  - volume: float
-  - value: float
+  -secid: str
+  -begin: datetime
+  -end: datetime
+  -open: float
+  -high: float
+  -low: float
+  -close: float
+  -volume: float
+  -value: float
+  +is_valid(): bool
 }
 
 class "Набор сырых минутных данных" as RawMinuteDataset {
-  + records
-}
-
-class "Набор подготовленных минутных данных" as PreparedMinuteDataset {
-  + records
-  + trade_date
-}
-
-class "Загрузчик данных" as DataLoader {
-  + load_bars(): List<MinuteBar>
-  + load_liquid_stocks(): List<Instrument>
+  -records
+  -instruments
+  +get_row_count()
 }
 
 class "Конвейер предварительной обработки" as PreprocessingPipeline {
-  + preprocess(data): PreparedMinuteDataset
+  +preprocess(data): PreparedMinuteDataset
+  +validate(data): bool
 }
 
 class "Проверка схемы и типов" as SchemaValidator {
-  + check_required_columns(data): bool
-  + convert_types(data): RawMinuteDataset
+  +check_required_columns(data): bool
+  +check_column_types(data): bool
+  +convert_types(data): RawMinuteDataset
 }
 
 class "Сортировка и удаление дубликатов" as SortAndDeduplicate {
-  + check_sorting(data): bool
-  + remove_duplicates(data): RawMinuteDataset
+  +check_sorting(data): bool
+  +sort_by_begin(data): RawMinuteDataset
+  +remove_duplicates(data): RawMinuteDataset
 }
 
 class "Разбиение по торговым дням" as TradeDaySplitter {
-  + add_trade_date(data): RawMinuteDataset
-  + split_by_trade_date(data)
+  +add_trade_date(data): RawMinuteDataset
+  +split_by_trade_date(data)
 }
 
 class "Построитель минутной сетки" as MinuteGridBuilder {
-  + build_minute_grid(data): PreparedMinuteDataset
+  +build_minute_grid(data): PreparedMinuteDataset
+  +count_missing_minutes(data): int
 }
 
 class "Заполнитель пропусков" as GapFiller {
-  + fill_gaps_forward(data): PreparedMinuteDataset
+  +fill_gaps_forward(data): PreparedMinuteDataset
+  +mark_imputed_rows(data): PreparedMinuteDataset
 }
 
 class "Восстановление служебных полей" as MetadataRestorer {
-  + restore_end(data): PreparedMinuteDataset
+  +restore_end(data): PreparedMinuteDataset
+  +check_end_consistency(data): bool
 }
 
+class "Набор подготовленных минутных данных" as PreparedMinuteDataset {
+  -records
+  -trade_date
+  -missing_rows_count
+  +get_trade_dates()
+}
+
+' --- Верхняя часть: загрузка и сырые данные
+DataLoader --> RawMinuteDataset
+DataLoader ..> Instrument
 Instrument "1" -- "*" MinuteBar : содержит
 RawMinuteDataset *-- MinuteBar
-PreparedMinuteDataset *-- MinuteBar
 
-DataLoader ..> RawMinuteDataset : формирует
-PreprocessingPipeline ..> RawMinuteDataset : принимает
-PreprocessingPipeline ..> PreparedMinuteDataset : возвращает
+' --- Центральный поток
+RawMinuteDataset --> PreprocessingPipeline : вход
+PreprocessingPipeline --> SchemaValidator : запускает
+SchemaValidator --> SortAndDeduplicate
+SortAndDeduplicate --> TradeDaySplitter
+TradeDaySplitter --> MinuteGridBuilder
+MinuteGridBuilder --> GapFiller
+GapFiller --> MetadataRestorer
+MetadataRestorer --> PreparedMinuteDataset
 
-PreprocessingPipeline ..> SchemaValidator : использует
-PreprocessingPipeline ..> SortAndDeduplicate : использует
-PreprocessingPipeline ..> TradeDaySplitter : использует
-PreprocessingPipeline ..> MinuteGridBuilder : использует
-PreprocessingPipeline ..> GapFiller : использует
-PreprocessingPipeline ..> MetadataRestorer : использует
-
+' --- Компоновка
+DataLoader -[hidden]right-> Instrument
+Instrument -[hidden]down-> RawMinuteDataset
+RawMinuteDataset -[hidden]down-> PreprocessingPipeline
+PreprocessingPipeline -[hidden]down-> SchemaValidator
 SchemaValidator -[hidden]down-> SortAndDeduplicate
 SortAndDeduplicate -[hidden]down-> TradeDaySplitter
 TradeDaySplitter -[hidden]down-> MinuteGridBuilder
 MinuteGridBuilder -[hidden]down-> GapFiller
 GapFiller -[hidden]down-> MetadataRestorer
-
-note bottom of SchemaValidator
-Проверяются:
-- обязательные колонки
-- типы данных
-- datetime в begin/end
-- numeric в OHLCV/value
-end note
-
-note bottom of MinuteGridBuilder
-Минутная сетка строится
-внутри каждого торгового дня,
-без перехода через ночь
-и выходные
-end note
-
-note bottom of GapFiller
-Используется ffill
-для open, high, low, close,
-volume, value
-end note
-
+MetadataRestorer -[hidden]down-> PreparedMinuteDataset
 @enduml
