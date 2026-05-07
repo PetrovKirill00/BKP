@@ -1,3 +1,10 @@
 moex_candles/*
+minute_dataset.csv
 minute_dataset.parquet
 .idea
+backtest_results/*
+models/*
+__pycache__/*
+logs.txt
+filtered_candles_summary.csv
+moex_securities.json

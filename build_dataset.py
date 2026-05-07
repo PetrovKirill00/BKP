@@ -13,6 +13,85 @@ VOLATILITY_WINDOWS = [5, 15]
 VOLUME_MA_WINDOWS = [5]
 
 
+FLOAT32_COLS = [
+    "open", "high", "low", "close", "volume", "value",
+    "log_volume", "log_value",
+
+    "return_1", "return_2", "return_3", "return_5",
+    "return_10", "return_15", "return_30",
+
+    "log_volume_diff_1", "log_value_diff_1",
+    "log_volume_ma_5", "log_value_ma_5",
+
+    "ma_close_5", "ma_close_15", "ma_close_30",
+    "close_to_ma_5", "close_to_ma_15", "close_to_ma_30",
+
+    "volatility_5", "volatility_15", "hl_range",
+
+    "body", "upper_wick", "lower_wick",
+
+    "next_open", "next_high", "next_low", "next_close",
+    "next_volume", "next_value",
+    "next_log_volume", "next_log_value",
+
+    "hour_sin", "hour_cos",
+    "minute_sin", "minute_cos",
+    "minute_from_midnight_sin", "minute_from_midnight_cos",
+    "day_of_week_sin", "day_of_week_cos",
+    "month_sin", "month_cos",
+    "day_of_month_sin", "day_of_month_cos",
+
+    f"target_return_{HORIZON}",
+]
+
+FLOAT32_COLS += [
+    f"execution_return_{horizon}"
+    for horizon in range(1, HORIZON + 1)
+]
+
+EXECUTION_RETURN_COLS = [
+    f"execution_return_{horizon}"
+    for horizon in range(1, HORIZON + 1)
+]
+
+HOLD_RETURN_COLS = [
+    f"hold_return_{horizon}"
+    for horizon in range(1, HORIZON + 1)
+]
+
+FLOAT32_COLS += HOLD_RETURN_COLS
+
+INT8_COLS = [
+    "is_imputed",
+    "hour",
+    "minute",
+    "day_of_week",
+    "day_of_month",
+    "month",
+    "days_in_month",
+    "is_month_start",
+    "is_month_end",
+]
+
+INT16_COLS = [
+    "minute_from_midnight",
+]
+
+
+def cast_dataset_dtypes(df):
+    for col in FLOAT32_COLS:
+        if col in df.columns:
+            df[col] = df[col].astype("float32")
+
+    for col in INT8_COLS:
+        if col in df.columns:
+            df[col] = df[col].astype("int8")
+
+    for col in INT16_COLS:
+        if col in df.columns:
+            df[col] = df[col].astype("int16")
+
+
 def read_liquid_secids():
     summary = pd.read_csv(FILTERED_SUMMARY_PATH)
     secids = summary["secid"].tolist()
@@ -35,7 +114,7 @@ def read_secid_file(secid):
 
     numeric_cols = ["open", "close", "high", "low", "value", "volume"]
     for col in numeric_cols:
-        df[col] = pd.to_numeric(df[col])
+        df[col] = pd.to_numeric(df[col]).astype("float32")
 
     if DEBUG:
         # sanity check
@@ -72,7 +151,7 @@ def build_minute_grid(df):
         day_df.index.name = "begin"
         day_df = day_df.reset_index()
 
-        day_df["is_imputed"] = day_df["open"].isna().astype(int)
+        day_df["is_imputed"] = day_df["open"].isna().astype("int8")
 
         fill_cols = ["open", "close", "high", "low", "value", "volume"]
         day_df[fill_cols] = day_df[fill_cols].ffill()
@@ -164,20 +243,22 @@ def add_candle_shape_features(df):
 
 
 def add_basic_time_features(df):
-    df["hour"] = df["begin"].dt.hour
-    df["minute"] = df["begin"].dt.minute
+    df["hour"] = df["begin"].dt.hour.astype("int8")
+    df["minute"] = df["begin"].dt.minute.astype("int8")
 
-    df["minute_from_midnight"] = df["hour"] * 60 + df["minute"]
+    df["minute_from_midnight"] = (
+        df["hour"].astype("int16") * 60 + df["minute"].astype("int16")
+    ).astype("int16")
 
     # 0 = понедельник, 6 = воскресенье
-    df["day_of_week"] = df["begin"].dt.dayofweek
+    df["day_of_week"] = df["begin"].dt.dayofweek.astype("int8")
 
-    df["day_of_month"] = df["begin"].dt.day
-    df["month"] = df["begin"].dt.month
-    df["days_in_month"] = df["begin"].dt.days_in_month
+    df["day_of_month"] = df["begin"].dt.day.astype("int8")
+    df["month"] = df["begin"].dt.month.astype("int8")
+    df["days_in_month"] = df["begin"].dt.days_in_month.astype("int8")
 
-    df["is_month_start"] = df["begin"].dt.is_month_start.astype(int)
-    df["is_month_end"] = df["begin"].dt.is_month_end.astype(int)
+    df["is_month_start"] = df["begin"].dt.is_month_start.astype("int8")
+    df["is_month_end"] = df["begin"].dt.is_month_end.astype("int8")
 
 
 def add_cyclic_time_features(df):
@@ -232,10 +313,38 @@ def add_target_return(df, horizon=HORIZON):
     df[f"target_return_{horizon}"] = future_close / df["close"] - 1.0
 
 
-def drop_rows_without_target(df, horizon=HORIZON):
-    target_col = f"target_return_{horizon}"
-    df.dropna(subset=[target_col], inplace=True)
+def add_execution_returns(df, max_horizon=HORIZON):
+    grouped = df.groupby("trade_date")
 
+    entry_open = grouped["open"].shift(-1)
+
+    for horizon in range(1, max_horizon + 1):
+        exit_close = grouped["close"].shift(-horizon)
+
+        col = f"execution_return_{horizon}"
+        df[col] = exit_close / entry_open - 1.0
+        df[col] = df[col].replace([np.inf, -np.inf], np.nan)
+
+
+def add_hold_returns(df, max_horizon=HORIZON):
+    grouped = df.groupby("trade_date")
+    current_close = df["close"].replace(0, np.nan)
+
+    for horizon in range(1, max_horizon + 1):
+        future_close = grouped["close"].shift(-horizon)
+
+        col = f"hold_return_{horizon}"
+        df[col] = future_close / current_close - 1.0
+        df[col] = df[col].replace([np.inf, -np.inf], np.nan)
+
+def drop_rows_without_target(df, max_horizon=HORIZON):
+    target_col = f"target_return_{max_horizon}"
+
+    required_cols = [target_col]
+    required_cols += EXECUTION_RETURN_COLS
+    required_cols += HOLD_RETURN_COLS
+
+    df.dropna(subset=required_cols, inplace=True)
 
 def process_secid_file(secid: str) -> pd.DataFrame:
     if DEBUG:
@@ -267,11 +376,14 @@ def process_secid_file(secid: str) -> pd.DataFrame:
 
     if DEBUG:
         print(f"{secid}: добавляю целевые значения")
-    add_next_minute_targets(df)     # in-place
+    add_next_minute_targets(df)  # in-place
     add_target_return(df, HORIZON)  # in-place
-    drop_rows_without_target(df)   # in-place
+    add_execution_returns(df, HORIZON)  # in-place
+    add_hold_returns(df, HORIZON)  # in-place
+    drop_rows_without_target(df)  # in-place
 
     df["secid"] = secid
+    cast_dataset_dtypes(df)
 
     ordered_cols = [
         "secid",
@@ -309,6 +421,8 @@ def process_secid_file(secid: str) -> pd.DataFrame:
         "next_log_volume", "next_log_value",
 
         f"target_return_{HORIZON}",
+        *EXECUTION_RETURN_COLS,
+        *HOLD_RETURN_COLS,
     ]
 
     existing_cols = [c for c in ordered_cols if c in df.columns]
@@ -333,7 +447,7 @@ def build_dataset():
     if DEBUG:
         print("Собираю данные вместе")
     ds = pd.concat(parts, ignore_index=True)
-    ds = ds.sort_values(["secid", "begin"]).reset_index(drop=True)
+    ds = ds.sort_values(["begin", "secid"]).reset_index(drop=True)
 
     return ds
 
@@ -356,6 +470,14 @@ def main():
     if DEBUG:
         ds.head(10000).to_csv(output_csv_path, index=False, encoding="utf-8-sig")
     print(f"Сохранено в {output_csv_path}")
+
+    print("\nТипы данных:")
+    print(ds.dtypes)
+
+    print("\nИспользование памяти:")
+    mem = ds.memory_usage(deep=True).sum()
+    print(mem / 1024 ** 2, "MB")
+    print(mem / 1024 ** 3, "GB")
 
 
 if __name__ == "__main__":
