@@ -1,0 +1,49 @@
+@startuml
+title Прогнозы моделей и гиперпараметры исторического тестирования
+
+left to right direction
+
+skinparam shadowing false
+skinparam dpi 150
+skinparam defaultFontName Arial
+
+skinparam rectangle {
+  FontSize 13
+  BorderColor Black
+  BackgroundColor White
+}
+
+skinparam component {
+  FontSize 13
+  BorderColor Black
+  BackgroundColor White
+}
+
+rectangle "Минутные данные\nи признаки" as Data
+rectangle "Окно последних\nминут наблюдений" as Window
+
+rectangle "Гиперпараметры\nпрогнозирования\n\n- горизонт k:\n  1, 5, 15, 30 минут\n- тип модели:\n  Ridge, GRU, LSTM,\n  Transformer, ARIMA" as ModelParams
+
+component "Прогнозирующая\nмодель" as Model
+
+rectangle "Прогнозы модели\n\n- доходность для входа\n  на горизонтах 1..k\n- доходность для удержания\n  на горизонтах 1..k" as Forecasts
+
+rectangle "Гиперпараметры\nстратегии\n\n- порог входа\n- максимум позиций\n- издержки покупки\n  и продажи\n- лимит удержания" as StrategyParams
+
+component "Модуль принятия\nторговых решений" as Decision
+
+rectangle "Историческое\nтестирование" as Backtest
+
+rectangle "Метрики результата\n\n- прибыль / убыток\n- максимальная просадка\n- число сделок\n- оборот" as Metrics
+
+Data --> Window
+Window --> Model
+ModelParams --> Model
+
+Model --> Forecasts
+Forecasts --> Decision
+StrategyParams --> Decision
+
+Decision --> Backtest
+Backtest --> Metrics
+@enduml

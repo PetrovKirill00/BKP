@@ -6,4 +6,5 @@ moex_candles/*
 backtest_results/*
 models/*
 __pycache__/*
-logs.txt
+*logs*
+data/*
