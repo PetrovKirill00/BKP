@@ -1,0 +1,62 @@
+@startuml
+title UML-диаграмма классов компонента исторического тестирования
+
+top to bottom direction
+skinparam shadowing false
+skinparam classAttributeIconSize 0
+skinparam linetype ortho
+skinparam nodesep 35
+skinparam ranksep 45
+
+class "Торговый сигнал" as TradeSignal {
+  + action
+  + instrument
+  + timestamp
+}
+
+class "Параметры стратегии" as StrategyParameters {
+  + entry_threshold: float
+  + exit_threshold: float
+  + position_limit: float
+  + max_positions: int
+  + commission: float
+  + spread: float
+}
+
+class "Портфель" as Portfolio {
+  + cash: float
+  + positions
+  + trade_history
+  + open_position(...)
+  + close_position(...)
+  + update_cash(...)
+}
+
+class "Исполнитель сделок" as TradeExecutor {
+  + execute(signal, portfolio, params): Portfolio
+}
+
+class "Пошаговая временная валидация" as WalkForwardValidator {
+  + split(data)
+  + iterate_windows(data)
+}
+
+class "Последовательная симуляция" as SequentialSimulator {
+  + step(...)
+  + run(...)
+}
+
+class "Движок исторического тестирования" as BacktestEngine {
+  + run()
+  + step()
+  + execute_trade(signal)
+}
+
+BacktestEngine ..> WalkForwardValidator : использует
+BacktestEngine ..> SequentialSimulator : использует
+BacktestEngine ..> TradeExecutor : использует
+BacktestEngine ..> Portfolio : обновляет
+TradeExecutor ..> TradeSignal : исполняет
+TradeExecutor ..> StrategyParameters : учитывает
+TradeExecutor ..> Portfolio : изменяет
+@enduml

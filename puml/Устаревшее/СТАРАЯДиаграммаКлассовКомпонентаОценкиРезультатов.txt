@@ -1,0 +1,44 @@
+@startuml
+title UML-диаграмма классов компонента оценки результатов
+
+top to bottom direction
+skinparam shadowing false
+skinparam classAttributeIconSize 0
+skinparam linetype ortho
+skinparam nodesep 35
+skinparam ranksep 45
+
+class "Результаты тестирования" as BacktestResult {
+  + equity_curve
+  + trade_history
+  + forecast_history
+}
+
+class "Оценка качества прогноза" as ForecastQualityEvaluator {
+  + calculate_error_metrics(...)
+  + calculate_directional_accuracy(...)
+}
+
+class "Оценка торговой эффективности" as TradingPerformanceEvaluator {
+  + calculate_pnl(...)
+  + calculate_max_drawdown(...)
+  + calculate_turnover(...)
+  + calculate_num_trades(...)
+}
+
+class "Компонент оценки результатов" as EvaluationComponent {
+  + evaluate_forecast_quality(...)
+  + evaluate_trading_performance(...)
+  + build_report(...)
+}
+
+class "Отчёт по результатам" as EvaluationReport {
+  + forecast_metrics
+  + trading_metrics
+}
+
+EvaluationComponent ..> BacktestResult : использует
+EvaluationComponent ..> ForecastQualityEvaluator : использует
+EvaluationComponent ..> TradingPerformanceEvaluator : использует
+EvaluationComponent ..> EvaluationReport : формирует
+@enduml

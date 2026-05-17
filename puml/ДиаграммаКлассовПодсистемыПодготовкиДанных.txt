@@ -1,70 +1,82 @@
 @startuml
 title UML-диаграмма классов подсистемы подготовки данных
 
+top to bottom direction
 skinparam shadowing false
 skinparam classAttributeIconSize 0
 skinparam linetype ortho
 skinparam nodesep 35
-skinparam ranksep 45
+skinparam ranksep 30
 
-class "Инструмент" as Instrument {
-  - secid: str
-  - name: str
+class "Источник данных MOEX" as MoexSource {
+  +get_securities_json()
+  +read_secids()
+  +download_candles_for_secid(secid, start_date, end_date)
+  +download_secids(secids)
 }
 
-class "Минутная свеча" as MinuteBar {
-  - begin: datetime
-  - end: datetime
-  - open: float
-  - high: float
-  - low: float
-  - close: float
-  - volume: float
-  - value: float
+class "Фильтр ликвидных инструментов" as LiquidityFilter {
+  +build_candles_summary(candles_dir)
+  +filter_by_first_date(summary)
+  +filter_by_active_months(summary)
+  +filter_by_avg_rows(summary)
 }
 
-class "Загрузчик данных" as DataLoader {
-  + load_bars(): List<MinuteBar>
-  + load_liquid_stocks()
+class "Исходные минутные данные" as RawData {
+  -secid
+  -begin
+  -end
+  -open
+  -high
+  -low
+  -close
+  -volume
+  -value
 }
 
-class "Предварительная обработка данных" as DataPreprocessor {
-  + check_sorting(data)
-  + remove_duplicates(data)
-  + build_minute_grid(data)
-  + fill_gaps(data)
-  + restore_end(data)
+class "Конвейер предварительной обработки" as PreprocessingPipeline {
+  +read_liquid_secids()
+  +read_secid_file(secid)
+  +build_minute_grid(df)
+  +restore_end(df)
 }
 
-class "Построитель признаков" as FeatureBuilder {
-  + add_basic_time_features(data)
-  + add_cyclic_time_features(data)
-  + add_lag_features(data)
-  + add_rolling_features(data)
+class "Формирователь признаков" as FeatureBuilder {
+  +add_basic_time_features(df)
+  +add_cyclic_time_features(df)
+  +add_log_features(df)
+  +add_return_lag_features(df)
+  +add_volume_features(df)
+  +add_rolling_features(df)
+  +add_volatility_features(df)
+  +add_candle_shape_features(df)
 }
 
-class "Формирователь целевых переменных" as TargetBuilder {
-  + add_targets(data)
-  + drop_last_row_of_day(data)
+class "Формирователь целевых значений" as TargetBuilder {
+  +add_next_minute_targets(df)
+  +add_target_return(df, horizon)
+  +add_execution_returns(df, max_horizon)
+  +add_hold_returns(df, max_horizon)
+  +drop_rows_without_target(df)
 }
 
-class "Строка датасета" as DatasetRow {
-  - features
-  - next_open
-  - next_high
-  - next_low
-  - next_close
-  - next_volume
-  - next_value
-  - next_log_volume
-  - next_log_value
+class "Итоговый минутный датасет" as FinalDataset {
+  -secid
+  -begin
+  -end
+  -trade_date
+  -features
+  -targets
+  +cast_dataset_dtypes(df)
+  +build_dataset()
+  +to_parquet(path)
 }
 
-Instrument "1" -- "*" MinuteBar : содержит
-DataLoader ..> MinuteBar : загружает
-DataPreprocessor ..> MinuteBar : обрабатывает
-FeatureBuilder ..> MinuteBar : использует
-TargetBuilder ..> MinuteBar : использует
-FeatureBuilder ..> DatasetRow : формирует
-TargetBuilder ..> DatasetRow : дополняет
+MoexSource --> LiquidityFilter : CSV-файлы свечей
+LiquidityFilter --> RawData : выбранные secid
+RawData --> PreprocessingPipeline : исходные данные
+PreprocessingPipeline --> FeatureBuilder : подготовленные данные
+FeatureBuilder --> TargetBuilder : признаки
+TargetBuilder --> FinalDataset : обучающий датасет
+
 @enduml

@@ -1,0 +1,54 @@
+@startuml
+title UML-диаграмма классов подсистемы прогнозирования
+
+top to bottom direction
+skinparam shadowing false
+skinparam classAttributeIconSize 0
+skinparam linetype ortho
+skinparam nodesep 40
+skinparam ranksep 55
+
+class "Подсистема прогнозирования" as ForecastingSubsystem {
+  + train_model(model, X, y)
+  + make_forecast(model, X): ForecastResult
+}
+
+abstract class "Модель прогнозирования" as ForecastModel {
+  + fit(X, y)
+  + predict(X): ForecastResult
+}
+
+class "Вектор признаков" as FeatureVector {
+  + features
+}
+
+class "Результат прогноза" as ForecastResult {
+  + expected_return: float
+  + horizon: int
+  + timestamp: datetime
+}
+
+class "Наивная модель" as NaiveModel
+class "Линейная регрессия" as LinearModel
+class "GRU-модель" as GRUModel
+class "1D CNN-модель" as CNNModel
+class "Трансформер-модель" as TransformerModel
+
+ForecastingSubsystem ..> ForecastModel : использует
+ForecastingSubsystem ..> FeatureVector : принимает
+ForecastingSubsystem ..> ForecastResult : возвращает
+
+ForecastModel ..> FeatureVector : uses
+ForecastModel ..> ForecastResult : returns
+
+ForecastModel <|-- NaiveModel
+ForecastModel <|-- LinearModel
+ForecastModel <|-- GRUModel
+ForecastModel <|-- CNNModel
+ForecastModel <|-- TransformerModel
+
+NaiveModel -[hidden]down-> LinearModel
+LinearModel -[hidden]down-> GRUModel
+GRUModel -[hidden]down-> CNNModel
+CNNModel -[hidden]down-> TransformerModel
+@enduml

@@ -5,58 +5,111 @@ top to bottom direction
 skinparam shadowing false
 skinparam classAttributeIconSize 0
 skinparam linetype ortho
-skinparam nodesep 35
-skinparam ranksep 45
+skinparam nodesep 28
+skinparam ranksep 28
 
-class "Торговый сигнал" as TradeSignal {
-  + action
-  + instrument
-  + timestamp
+class "Компонент исторического тестирования" as BacktestComponent {
+  +process_split(split_name, model_name, parameter_grid)
+  +run_validation_backtest()
+  +run_test_backtest()
 }
 
-class "Параметры стратегии" as StrategyParameters {
-  + entry_threshold: float
-  + exit_threshold: float
-  + position_limit: float
-  + max_positions: int
-  + commission: float
-  + spread: float
+class "Данные выборки" as SplitData {
+  -split_name
+  -begin
+  -secid
+  -close
+  -next_open
+}
+
+class "Построитель rule-based score" as RuleBasedScoreBuilder {
+  +add_rule_based_features(df)
+  +get_strategy_score(df, strategy_name)
+  +build_rule_based_backtest_dataset(df, strategy_name)
+}
+
+class "Загрузчик прогнозов моделей" as PredictionLoader {
+  +get_prediction_data_path(model_name, split_name)
+  +read_prediction_dataset(model_name, split_name)
+  +validate_prediction_data(df, model_name, split_name)
+}
+
+class "Данные для backtest" as BacktestDataset {
+  -begin
+  -secid
+  -close
+  -next_open
+  -open_score
+  -open_horizon
+  -hold_score
+  -hold_horizon
+}
+
+class "Сетка торговых параметров" as ParameterGrid {
+  -threshold_bp
+  -max_positions
+  -buy_cost_bp
+  -sell_cost_bp
+  +get_model_parameter_grid(model_name)
+}
+
+class "Выбор параметров на validation" as ValidationSelector {
+  +select_best_validation_configs_by_cost(valid_summary)
+}
+
+class "Движок последовательного backtest" as BacktestEngine {
+  +run_stateful_portfolio_backtest(data, parameter_grid)
+  +try_close_positions(...)
+  +try_open_positions(...)
+  +close_all_positions_at_end(...)
 }
 
 class "Портфель" as Portfolio {
-  + cash: float
-  + positions
-  + trade_history
-  + open_position(...)
-  + close_position(...)
-  + update_cash(...)
+  -cash
+  -open_positions
+  -trade_events
+  -closed_trades
+  +mark_to_market()
+  +calculate_exposure_by_secid()
 }
 
 class "Исполнитель сделок" as TradeExecutor {
-  + execute(signal, portfolio, params): Portfolio
+  +select_open_candidates(...)
+  +close_position(...)
 }
 
-class "Пошаговая временная валидация" as WalkForwardValidator {
-  + split(data)
-  + iterate_windows(data)
+class "Калькулятор метрик" as MetricsCalculator {
+  +calculate_backtest_metrics(equity_df, trade_events_df, closed_trades_df)
 }
 
-class "Последовательная симуляция" as SequentialSimulator {
-  + step(...)
-  + run(...)
+class "Результаты backtest" as BacktestResults {
+  -summary
+  -equity_curve
+  -trade_events
+  -closed_trades
+  +save_backtest_details()
+  +save_summary()
 }
 
-class "Движок исторического тестирования" as BacktestEngine {
-  + run()
-  + step()
-  + execute_trade(signal)
-}
+BacktestComponent --> SplitData : читает valid/test
+BacktestComponent --> ParameterGrid : использует
 
-BacktestEngine ..> WalkForwardValidator : использует
-BacktestEngine ..> SequentialSimulator : использует
-BacktestEngine ..> TradeExecutor : использует
-BacktestEngine ..> Portfolio : обновляет
-TradeExecutor ..> TradeSignal : исполняет
-TradeExecutor ..> StrategyParameters : учитывает
-TradeExecutor ..> Portfolio : изменяет
+SplitData --> RuleBasedScoreBuilder : для методов на правилах
+SplitData --> PredictionLoader : для обучаемых моделей
+
+RuleBasedScoreBuilder --> BacktestDataset : формирует
+PredictionLoader --> BacktestDataset : читает
+
+ParameterGrid --> BacktestEngine : передаёт параметры
+BacktestDataset --> BacktestEngine : передаёт данные
+
+BacktestEngine --> Portfolio : обновляет
+BacktestEngine --> TradeExecutor : исполняет сделки
+TradeExecutor --> Portfolio : изменяет состояние
+
+BacktestEngine --> MetricsCalculator : передаёт историю
+MetricsCalculator --> BacktestResults : формирует summary
+
+BacktestResults --> ValidationSelector : validation summary
+ValidationSelector --> ParameterGrid : выбирает параметры для test
 @enduml

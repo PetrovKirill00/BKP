@@ -1,0 +1,70 @@
+@startuml
+title UML-диаграмма классов подсистемы подготовки данных
+
+skinparam shadowing false
+skinparam classAttributeIconSize 0
+skinparam linetype ortho
+skinparam nodesep 35
+skinparam ranksep 45
+
+class "Инструмент" as Instrument {
+  - secid: str
+  - name: str
+}
+
+class "Минутная свеча" as MinuteBar {
+  - begin: datetime
+  - end: datetime
+  - open: float
+  - high: float
+  - low: float
+  - close: float
+  - volume: float
+  - value: float
+}
+
+class "Загрузчик данных" as DataLoader {
+  + load_bars(): List<MinuteBar>
+  + load_liquid_stocks()
+}
+
+class "Предварительная обработка данных" as DataPreprocessor {
+  + check_sorting(data)
+  + remove_duplicates(data)
+  + build_minute_grid(data)
+  + fill_gaps(data)
+  + restore_end(data)
+}
+
+class "Построитель признаков" as FeatureBuilder {
+  + add_basic_time_features(data)
+  + add_cyclic_time_features(data)
+  + add_lag_features(data)
+  + add_rolling_features(data)
+}
+
+class "Формирователь целевых переменных" as TargetBuilder {
+  + add_targets(data)
+  + drop_last_row_of_day(data)
+}
+
+class "Строка датасета" as DatasetRow {
+  - features
+  - next_open
+  - next_high
+  - next_low
+  - next_close
+  - next_volume
+  - next_value
+  - next_log_volume
+  - next_log_value
+}
+
+Instrument "1" -- "*" MinuteBar : содержит
+DataLoader ..> MinuteBar : загружает
+DataPreprocessor ..> MinuteBar : обрабатывает
+FeatureBuilder ..> MinuteBar : использует
+TargetBuilder ..> MinuteBar : использует
+FeatureBuilder ..> DatasetRow : формирует
+TargetBuilder ..> DatasetRow : дополняет
+@enduml

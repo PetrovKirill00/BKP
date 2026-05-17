@@ -9,7 +9,6 @@ import pandas as pd
 from validation_hyperparameters import (
     RUN_VALIDATION_BACKTEST,
     RUN_TEST_BACKTEST,
-    TO_BACKTEST,
     VALIDATION_PARAMETER_GRIDS,
 )
 
@@ -27,6 +26,66 @@ BEST_VALIDATION_HYPERPARAMETERS_PY_PATH = Path("best_validation_hyper_parameters
 BEST_VALIDATION_HYPERPARAMETERS_TEXT_PATH = Path("best_validation_hyper_parameters.txt")
 
 INITIAL_CASH = 1_000_000.0
+
+# ============================================================
+# Главный массив: что именно прогонять в backtest
+# ============================================================
+
+# Здесь в одном месте перечислены все проверяемые подходы:
+# 1) rule-based стратегии;
+# 2) flat ML-модели;
+# 3) нейросетевые sequence-модели.
+BACKTEST_STRATEGIES = [
+    "momentum",
+    "mean_reversion",
+    "ma_trend",
+    "breakout",
+
+    "ridge",
+    "catboost",
+    "random_forest",
+    "decision_tree",
+
+    "gru",
+    "lstm",
+    "transformer",
+    "tcn",
+]
+
+RULE_BASED_STRATEGIES = {
+    "momentum",
+    "mean_reversion",
+    "ma_trend",
+    "breakout",
+}
+
+MODEL_BASED_STRATEGIES = {
+    "ridge",
+    "catboost",
+    "random_forest",
+    "decision_tree",
+    "gru",
+    "lstm",
+    "transformer",
+    "tcn",
+}
+
+STRATEGY_LABELS = {
+    "momentum": "Momentum",
+    "mean_reversion": "Mean Reversion",
+    "ma_trend": "MA Trend",
+    "breakout": "Breakout",
+    "ridge": "Ridge",
+    "catboost": "CatBoost",
+    "random_forest": "Random Forest",
+    "decision_tree": "Decision Tree",
+    "gru": "GRU",
+    "lstm": "LSTM",
+    "transformer": "Transformer",
+    "tcn": "TCN",
+}
+
+
 
 # ============================================================
 # Pipeline
@@ -102,25 +161,49 @@ VERBOSE = True
 
 def normalize_model_name(model_name: str) -> str:
     """
-    Приводит имя модели к каноническому виду для путей и внутренних проверок.
+    Приводит имя стратегии/модели к каноническому виду.
     """
-    normalized_name = model_name.lower()
+    normalized_name = str(model_name).lower()
 
     aliases = {
+        "momentum": "momentum",
+        "mean_reversion": "mean_reversion",
+        "meanreversion": "mean_reversion",
+        "ma_trend": "ma_trend",
+        "matrend": "ma_trend",
+        "breakout": "breakout",
         "ridge": "ridge",
+        "ridge_regression": "ridge",
+        "ridgeregression": "ridge",
+        "catboost": "catboost",
+        "cat_boost": "catboost",
+        "random_forest": "random_forest",
+        "randomforest": "random_forest",
+        "rf": "random_forest",
+        "decision_tree": "decision_tree",
+        "decisiontree": "decision_tree",
+        "dt": "decision_tree",
         "gru": "gru",
         "lstm": "lstm",
         "transformer": "transformer",
-        "arima": "arima",
+        "tcn": "tcn",
     }
 
     if normalized_name in aliases:
         return aliases[normalized_name]
 
     raise ValueError(
-        f"Неизвестная модель: {model_name}. "
-        "Допустимые значения: 'ridge', 'GRU', 'LSTM', 'transformer', 'ARIMA'."
+        f"Неизвестная стратегия/модель: {model_name}. "
+        f"Допустимые значения: {sorted(aliases)}."
     )
+
+
+def is_rule_based_strategy(name: str) -> bool:
+    return normalize_model_name(name) in RULE_BASED_STRATEGIES
+
+
+def is_model_based_strategy(name: str) -> bool:
+    return normalize_model_name(name) in MODEL_BASED_STRATEGIES
 
 
 def get_active_backtest_settings() -> dict[str, Any]:
@@ -174,16 +257,23 @@ def log(message: str) -> None:
 
 def get_model_file_prefix(model_name: str) -> str:
     """
-    Возвращает префикс имён файлов для конкретной модели.
+    Возвращает префикс имён файлов для конкретной стратегии/модели.
     """
     normalized_name = normalize_model_name(model_name)
 
     prefixes = {
+        "momentum": "momentum",
+        "mean_reversion": "mean_reversion",
+        "ma_trend": "ma_trend",
+        "breakout": "breakout",
         "ridge": "ridge",
+        "catboost": "catboost",
+        "random_forest": "random_forest",
+        "decision_tree": "decision_tree",
         "gru": "GRU",
         "lstm": "LSTM",
         "transformer": "transformer",
-        "arima": "ARIMA",
+        "tcn": "TCN",
     }
 
     return prefixes[normalized_name]
@@ -1606,6 +1696,238 @@ def select_best_validation_configs_by_cost(
     return best_configs
 
 
+# ============================================================
+# Rule-based стратегии: чтение данных и построение score
+# ============================================================
+
+
+def get_split_data_candidates(split_name: str) -> list[Path]:
+    """
+    Ищет данные для rule-based стратегий.
+
+    Лучший вариант — отдельный parquet с признаками valid/test. Если его нет,
+    пробуем использовать prediction-файлы обучаемых моделей, если в них остались
+    базовые колонки.
+    """
+    candidates = [
+        DATA_ROOT / f"{split_name}_dataset.parquet",
+        DATA_ROOT / f"{split_name}.parquet",
+        DATA_ROOT / "datasets" / f"{split_name}_dataset.parquet",
+        DATA_ROOT / "datasets" / f"{split_name}.parquet",
+        DATA_ROOT / "features" / f"{split_name}_features.parquet",
+        DATA_ROOT / "features" / f"{split_name}.parquet",
+    ]
+
+    for model_name in [
+        "ridge",
+        "catboost",
+        "random_forest",
+        "decision_tree",
+        "gru",
+        "lstm",
+        "transformer",
+        "tcn",
+    ]:
+        candidates.append(DATA_ROOT / model_name / f"{split_name}_predictions.parquet")
+
+    candidates.extend([
+        Path(f"{split_name}_dataset.parquet"),
+        Path(f"{split_name}.parquet"),
+        Path(f"{split_name}_predictions.parquet"),
+    ])
+
+    return candidates
+
+
+def find_split_data_path(split_name: str) -> Path:
+    for path in get_split_data_candidates(split_name):
+        if path.exists():
+            return path
+
+    candidates_text = "\n".join(str(path) for path in get_split_data_candidates(split_name))
+    raise FileNotFoundError(
+        f"Не найден файл данных для rule-based split={split_name}. Проверялись пути:\n{candidates_text}"
+    )
+
+
+def read_split_dataset(split_name: str, debug_max_minutes: int | None) -> pd.DataFrame:
+    path = find_split_data_path(split_name)
+    log(f"Читаю данные для rule-based split={split_name}: {path}")
+
+    if path.suffix.lower() == ".csv":
+        df = pd.read_csv(path)
+    else:
+        df = pd.read_parquet(path)
+
+    for col in ["begin", "secid", "close"]:
+        if col not in df.columns:
+            raise ValueError(f"В файле {path} нет колонки {col}")
+
+    df = df.copy()
+    df["begin"] = pd.to_datetime(df["begin"], errors="coerce")
+    df = df.dropna(subset=["begin", "secid", "close"]).copy()
+    df = df.sort_values(["begin", "secid"]).reset_index(drop=True)
+
+    if debug_max_minutes is not None:
+        unique_minutes = df["begin"].drop_duplicates()
+        if len(unique_minutes) > debug_max_minutes:
+            last_allowed_minute = unique_minutes.iloc[debug_max_minutes - 1]
+            df = df[df["begin"] <= last_allowed_minute].copy()
+            log(
+                f"{split_name}: debug_max_minutes={debug_max_minutes}, "
+                f"last_allowed_minute={last_allowed_minute}, shape={df.shape}"
+            )
+
+    log(
+        f"{split_name}: shape={df.shape}, "
+        f"begin={df['begin'].min()} -> {df['begin'].max()}, "
+        f"минут={df['begin'].nunique()}, бумаг={df['secid'].nunique()}"
+    )
+
+    return df
+
+
+def ensure_trade_date(df: pd.DataFrame) -> None:
+    if "trade_date" not in df.columns or df["trade_date"].isna().any():
+        df["trade_date"] = df["begin"].dt.date
+
+
+def ensure_next_open(df: pd.DataFrame) -> None:
+    if "next_open" in df.columns:
+        return
+
+    if "open" not in df.columns:
+        raise ValueError(
+            "Для backtest нужна колонка next_open. Её нет, а open тоже нет, "
+            "поэтому next_open невозможно восстановить."
+        )
+
+    group_keys = ["secid", "trade_date"]
+    df["next_open"] = df.groupby(group_keys, sort=False)["open"].shift(-1)
+
+
+def add_return_feature(df: pd.DataFrame, lag: int) -> None:
+    col = f"return_{lag}"
+    if col in df.columns:
+        return
+
+    group_keys = ["secid", "trade_date"]
+    df[col] = (
+        df.groupby(group_keys, sort=False)["close"]
+        .pct_change(periods=lag)
+        .replace([np.inf, -np.inf], np.nan)
+        .fillna(0.0)
+    )
+
+
+def add_ma_feature(df: pd.DataFrame, window: int) -> None:
+    ma_col = f"ma_close_{window}"
+    if ma_col not in df.columns:
+        group_keys = ["secid", "trade_date"]
+        df[ma_col] = (
+            df.groupby(group_keys, sort=False)["close"]
+            .transform(lambda s: s.rolling(window=window, min_periods=1).mean())
+        )
+
+    ratio_col = f"close_to_ma_{window}"
+    if ratio_col not in df.columns:
+        df[ratio_col] = (
+            df["close"] / df[ma_col].replace(0, np.nan) - 1.0
+        ).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+
+def add_breakout_feature(df: pd.DataFrame, window: int = 15) -> None:
+    col = f"breakout_{window}"
+    if col in df.columns:
+        return
+
+    group_keys = ["secid", "trade_date"]
+    high_col = "high" if "high" in df.columns else "close"
+    rolling_high_col = f"rolling_high_{window}"
+
+    df[rolling_high_col] = (
+        df.groupby(group_keys, sort=False)[high_col]
+        .transform(lambda s: s.shift(1).rolling(window=window, min_periods=1).max())
+    )
+
+    df[col] = (
+        df["close"] / df[rolling_high_col].replace(0, np.nan) - 1.0
+    ).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+
+def add_rule_based_features(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    ensure_trade_date(df)
+    ensure_next_open(df)
+    add_return_feature(df, 15)
+    for window in [5, 15, 30]:
+        add_ma_feature(df, window)
+    add_breakout_feature(df, window=15)
+    return df
+
+
+def get_strategy_score(df: pd.DataFrame, strategy_name: str) -> pd.Series:
+    normalized_name = normalize_model_name(strategy_name)
+
+    if normalized_name == "momentum":
+        score = df["return_15"]
+    elif normalized_name == "mean_reversion":
+        score = -df["close_to_ma_15"]
+    elif normalized_name == "ma_trend":
+        score = df["ma_close_5"] / df["ma_close_30"].replace(0, np.nan) - 1.0
+    elif normalized_name == "breakout":
+        score = df["breakout_15"]
+    else:
+        raise ValueError(f"Неизвестная rule-based стратегия: {strategy_name}")
+
+    return score.replace([np.inf, -np.inf], np.nan).fillna(0.0).astype("float32")
+
+
+def build_rule_based_backtest_dataset(
+        base_df: pd.DataFrame,
+        strategy_name: str,
+) -> pd.DataFrame:
+    df = add_rule_based_features(base_df)
+    score = get_strategy_score(df, strategy_name)
+
+    out = pd.DataFrame({
+        "begin": df["begin"],
+        "secid": df["secid"],
+        "close": pd.to_numeric(df["close"], errors="coerce"),
+        "next_open": pd.to_numeric(df["next_open"], errors="coerce"),
+        "open_score": score,
+        "open_horizon": HORIZON,
+        "hold_score": score,
+        "hold_horizon": HORIZON,
+    })
+
+    required_cols = [
+        "begin",
+        "secid",
+        "close",
+        "next_open",
+        "open_score",
+        "open_horizon",
+        "hold_score",
+        "hold_horizon",
+    ]
+
+    out = out.dropna(subset=required_cols).copy()
+    numeric_cols = [
+        "close",
+        "next_open",
+        "open_score",
+        "open_horizon",
+        "hold_score",
+        "hold_horizon",
+    ]
+    finite_mask = np.isfinite(out[numeric_cols].to_numpy()).all(axis=1)
+    out = out[finite_mask].copy()
+    out = out.sort_values(["begin", "secid"]).reset_index(drop=True)
+
+    return out
+
+
 def get_prediction_data_path(
         model_name: str,
         split_name: str,
@@ -1738,15 +2060,29 @@ def process_split(
         results_dir: Path,
 ) -> pd.DataFrame:
     """
-    Запускает backtest для одной выборки на уже готовых прогнозах модели.
-    """
-    log(f"{model_name}: начинаю обработку split={split_name}")
+    Запускает backtest для одной выборки.
 
-    df = read_prediction_dataset(
-        model_name=model_name,
-        split_name=split_name,
-        debug_max_minutes=active_settings["debug_max_minutes"],
-    )
+    Для model-based стратегий читает готовые prediction-файлы из data/<model>/.
+    Для rule-based стратегий строит open_score/hold_score из исторических признаков.
+    """
+    normalized_name = normalize_model_name(model_name)
+    log(f"{normalized_name}: начинаю обработку split={split_name}")
+
+    if is_rule_based_strategy(normalized_name):
+        base_df = read_split_dataset(
+            split_name=split_name,
+            debug_max_minutes=active_settings["debug_max_minutes"],
+        )
+        df = build_rule_based_backtest_dataset(
+            base_df=base_df,
+            strategy_name=normalized_name,
+        )
+    else:
+        df = read_prediction_dataset(
+            model_name=normalized_name,
+            split_name=split_name,
+            debug_max_minutes=active_settings["debug_max_minutes"],
+        )
 
     if split_name == "valid":
         save_details = active_settings["save_validation_details"]
@@ -1761,12 +2097,12 @@ def process_split(
         parameter_grid=parameter_grid,
         progress_every_minutes=active_settings["progress_every_minutes"],
         save_details=save_details,
-        model_name=model_name,
+        model_name=normalized_name,
         results_dir=results_dir,
         initial_cash=INITIAL_CASH,
     )
 
-    log(f"{model_name}: обработка split={split_name} завершена")
+    log(f"{normalized_name}: обработка split={split_name} завершена")
 
     return summary
 
@@ -1847,7 +2183,7 @@ def build_best_hyperparameters_py(
         "# Этот файл предназначен для финального test-прогона без повторной validation.\n"
         "RUN_VALIDATION_BACKTEST = False\n"
         "RUN_TEST_BACKTEST = True\n\n"
-        f"TO_BACKTEST = {models_repr}\n\n"
+        f"BACKTEST_STRATEGIES = {models_repr}\n\n"
         f"VALIDATION_PARAMETER_GRIDS = {grids_repr}\n\n"
         "BEST_VALIDATION_CONFIGS_BY_MODEL = VALIDATION_PARAMETER_GRIDS\n"
     )
@@ -1965,22 +2301,22 @@ def main() -> None:
     )
     log(f"RUN_VALIDATION_BACKTEST={RUN_VALIDATION_BACKTEST}")
     log(f"RUN_TEST_BACKTEST={RUN_TEST_BACKTEST}")
-    log(f"Модели для backtest: {TO_BACKTEST}")
+    log(f"Стратегии/модели для backtest: {BACKTEST_STRATEGIES}")
     log("Grid торговых гиперпараметров: validation_hyperparameters.py")
     log("Обучение моделей в этом файле не выполняется")
     log(f"debug_max_minutes: {active_settings['debug_max_minutes']}")
 
-    if not TO_BACKTEST:
+    if not BACKTEST_STRATEGIES:
         raise ValueError(
-            "TO_BACKTEST пустой. Укажи хотя бы одну модель в "
-            "validation_hyperparameters.py, например: TO_BACKTEST = ['ridge']."
+            "BACKTEST_STRATEGIES пустой. Укажи хотя бы одну стратегию/модель "
+            "в списке BACKTEST_STRATEGIES внутри backtest_strategy.py."
         )
 
     all_valid_summaries = []
     all_test_summaries = []
     best_parameter_grids_by_model: dict[str, list[dict[str, float | int]]] = {}
 
-    for model_name in TO_BACKTEST:
+    for model_name in BACKTEST_STRATEGIES:
         normalized_model_name = normalize_model_name(model_name)
 
         log("=" * 80)
@@ -2121,7 +2457,7 @@ def main() -> None:
     if all_valid_summaries:
         combined_valid = pd.concat(all_valid_summaries, ignore_index=True)
         combined_valid.to_csv(
-            RESULTS_DIR / "all_models_valid_summary.csv",
+            RESULTS_DIR / "all_strategies_valid_summary.csv",
             index=False,
             encoding="utf-8-sig",
         )
@@ -2129,7 +2465,7 @@ def main() -> None:
     if all_test_summaries:
         combined_test = pd.concat(all_test_summaries, ignore_index=True)
         combined_test.to_csv(
-            RESULTS_DIR / "all_models_test_summary.csv",
+            RESULTS_DIR / "all_strategies_test_summary.csv",
             index=False,
             encoding="utf-8-sig",
         )

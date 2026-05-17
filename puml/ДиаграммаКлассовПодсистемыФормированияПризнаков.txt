@@ -6,33 +6,31 @@ skinparam shadowing false
 skinparam classAttributeIconSize 0
 skinparam linetype ortho
 skinparam nodesep 28
-skinparam ranksep 32
+skinparam ranksep 28
 
-class "Подготовленные минутные данные" as PreparedMinuteDataset {
-  -records
-  +get_row_count()
+class "Подготовленные минутные данные" as PreparedMinuteData {
+  -secid
+  -begin
+  -end
+  -trade_date
+  -is_imputed
+  -open
+  -high
+  -low
+  -close
+  -volume
+  -value
 }
 
-class "Конвейер формирования признаков" as FeatureEngineeringPipeline {
-  +add_basic_time_features(data)
-  +add_cyclic_time_features(data)
-  +add_return_lag_features(data)
-  +add_volume_features(data)
-  +add_rolling_features(data)
-  +add_volatility_features(data)
-  +add_candle_shape_features(data)
-  +build_feature_vector(data): FeatureVector
-}
-
-class "Вектор признаков" as FeatureVector {
-  -basic_time_features
-  -cyclic_time_features
-  -return_lag_features
-  -volume_features
-  -rolling_features
-  -volatility_features
-  -candle_shape_features
-  +to_matrix()
+class "Конвейер формирования признаков" as FeaturePipeline {
+  +add_basic_time_features(df)
+  +add_cyclic_time_features(df)
+  +add_log_features(df)
+  +add_return_lag_features(df)
+  +add_volume_features(df)
+  +add_rolling_features(df)
+  +add_volatility_features(df)
+  +add_candle_shape_features(df)
 }
 
 class "Базовые временные признаки" as BasicTimeFeatures {
@@ -72,7 +70,7 @@ class "Лаговые признаки доходности" as ReturnLagFeature
   -return_30
 }
 
-class "Признаки объёма и оборота" as VolumeFeatures {
+class "Признаки объёма и оборота" as VolumeValueFeatures {
   -log_volume
   -log_value
   -log_volume_diff_1
@@ -81,12 +79,13 @@ class "Признаки объёма и оборота" as VolumeFeatures {
   -log_value_ma_5
 }
 
-class "Скользящие характеристики" as RollingFeatures {
+class "Скользящие ценовые признаки" as RollingPriceFeatures {
   -ma_close_5
   -ma_close_15
   -ma_close_30
   -close_to_ma_5
   -close_to_ma_15
+  -close_to_ma_30
 }
 
 class "Признаки изменчивости" as VolatilityFeatures {
@@ -101,22 +100,37 @@ class "Признаки геометрии свечи" as CandleShapeFeatures {
   -lower_wick
 }
 
-PreparedMinuteDataset --> FeatureEngineeringPipeline : вход
-FeatureEngineeringPipeline --> FeatureVector : формирует
+class "Датасет с признаками" as FeatureDataset {
+  -secid
+  -begin
+  -trade_date
+  -исходные_поля
+  -построенные_признаки
+}
 
-FeatureEngineeringPipeline ..> BasicTimeFeatures : добавляет
-FeatureEngineeringPipeline ..> CyclicTimeFeatures : добавляет
-FeatureEngineeringPipeline ..> ReturnLagFeatures : добавляет
-FeatureEngineeringPipeline ..> VolumeFeatures : добавляет
-FeatureEngineeringPipeline ..> RollingFeatures : добавляет
-FeatureEngineeringPipeline ..> VolatilityFeatures : добавляет
-FeatureEngineeringPipeline ..> CandleShapeFeatures : добавляет
+PreparedMinuteData --> FeaturePipeline : входные данные
 
-FeatureVector *-- BasicTimeFeatures
-FeatureVector *-- CyclicTimeFeatures
-FeatureVector *-- ReturnLagFeatures
-FeatureVector *-- VolumeFeatures
-FeatureVector *-- RollingFeatures
-FeatureVector *-- VolatilityFeatures
-FeatureVector *-- CandleShapeFeatures
+FeaturePipeline --> BasicTimeFeatures : формирует
+FeaturePipeline --> CyclicTimeFeatures : формирует
+FeaturePipeline --> ReturnLagFeatures : формирует
+FeaturePipeline --> VolumeValueFeatures : формирует
+FeaturePipeline --> RollingPriceFeatures : формирует
+FeaturePipeline --> VolatilityFeatures : формирует
+FeaturePipeline --> CandleShapeFeatures : формирует
+
+BasicTimeFeatures --> FeatureDataset : добавляются
+CyclicTimeFeatures --> FeatureDataset : добавляются
+ReturnLagFeatures --> FeatureDataset : добавляются
+VolumeValueFeatures --> FeatureDataset : добавляются
+RollingPriceFeatures --> FeatureDataset : добавляются
+VolatilityFeatures --> FeatureDataset : добавляются
+CandleShapeFeatures --> FeatureDataset : добавляются
+
+note bottom of FeatureDataset
+  Целевые значения next_*, target_return_*,
+  execution_return_* и hold_return_*
+  формируются отдельным этапом,
+  после построения признаков.
+end note
+
 @enduml

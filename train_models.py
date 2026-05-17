@@ -12,19 +12,24 @@ import joblib
 import numpy as np
 import pandas as pd
 
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import Ridge
 from sklearn.preprocessing import StandardScaler
-
-from constants import HORIZON, TRAIN_UNTIL, VALIDATE_UNTIL, WINDOW_SIZE
+from sklearn.tree import DecisionTreeRegressor
 
 try:
-    from constants import FINAL_STAGE_NAME, VALIDATION_STAGE_NAME
+    from catboost import CatBoostRegressor
 except ImportError:
-    # Если constants.py ещё не обновлён, используем стандартные имена этапов.
-    # Лучше всё равно добавить эти константы в constants.py, чтобы stage names
-    # были общими для всего проекта.
-    VALIDATION_STAGE_NAME = "validation"
-    FINAL_STAGE_NAME = "final"
+    CatBoostRegressor = None
+
+from constants import (
+    HORIZON,
+    TRAIN_UNTIL,
+    VALIDATE_UNTIL,
+    WINDOW_SIZE,
+    FINAL_STAGE_NAME,
+    VALIDATION_STAGE_NAME,
+)
 
 from prepare_sequence_shards import (
     FEATURE_COLS,
@@ -67,11 +72,75 @@ def log(*args: Any) -> None:
 
 # Здесь выбираешь, какие модели обучать и для каких моделей строить valid/test predictions.
 # Можно писать названия в любом регистре.
-# Доступно: "ridge", "GRU", "LSTM", "transformer", "ARIMA".
-# TO_TRAIN = ["ridge", "GRU", "LSTM", "transformer", "ARIMA"]
-TO_TRAIN = ["GRU", "LSTM", "transformer"]
+# ML-модели: "ridge", "catboost", "random_forest", "decision_tree".
+# Нейросетевые модели: "GRU", "LSTM", "transformer", "TCN".
+ML_MODELS_TO_TRAIN = [
+    #"ridge",
+    #"catboost",
+    #"random_forest",
+    #"decision_tree",
+]
+
+NEURAL_MODELS_TO_TRAIN = [
+    #"TCN",
+    #"GRU",
+    #"LSTM",
+    #"transformer",
+]
+
+# Единый список нужен только для main(). Переключай модели через два списка выше.
+TO_TRAIN = ML_MODELS_TO_TRAIN + NEURAL_MODELS_TO_TRAIN
+
+# ============================================================
+# Параметры ML-моделей
+# ============================================================
 
 RIDGE_ALPHA = 1.0
+
+# CatBoostRegressor используется как отдельная flat ML-модель.
+# Модель умеет multi-target regression через loss_function="MultiRMSE"
+# и может использовать GPU.
+CATBOOST_ITERATIONS = 300
+CATBOOST_LEARNING_RATE = 0.05
+CATBOOST_DEPTH = 8
+CATBOOST_L2_LEAF_REG = 3.0
+CATBOOST_LOSS_FUNCTION = "MultiRMSE"
+CATBOOST_TASK_TYPE = "GPU"   # Если GPU-режим не запустится, поменяй на "CPU".
+CATBOOST_DEVICES = "0"
+CATBOOST_RANDOM_SEED = 46
+CATBOOST_VERBOSE = 50
+
+# RandomForestRegressor умеет multi-output regression сам.
+# Ограничиваем число признаков на split и число потоков, чтобы не взрывать RAM.
+RANDOM_FOREST_N_ESTIMATORS = 50
+RANDOM_FOREST_MAX_DEPTH = 10
+RANDOM_FOREST_MIN_SAMPLES_LEAF = 100
+RANDOM_FOREST_MAX_FEATURES = "sqrt"
+RANDOM_FOREST_RANDOM_SEED = 47
+RANDOM_FOREST_N_JOBS = 4
+
+DECISION_TREE_MAX_DEPTH = 8
+DECISION_TREE_MIN_SAMPLES_LEAF = 100
+DECISION_TREE_RANDOM_SEED = 48
+
+# Глобальный fallback. None означает использовать весь train.
+ML_MAX_TRAIN_SAMPLES = None
+
+# Индивидуальные ограничения для тяжёлых flat ML-моделей.
+# Ridge оставляем на всём датасете, деревья учим на большой подвыборке:
+# этого достаточно для baseline-сравнения и не блокирует pipeline на часы.
+ML_MAX_TRAIN_SAMPLES_BY_MODEL = {
+    "ridge": None,
+    "catboost": 16_777_216,
+    "random_forest": None,
+    "decision_tree": None,
+}
+
+TREE_BASED_MODELS = {
+    "catboost",
+    "random_forest",
+    "decision_tree",
+}
 
 # ============================================================
 # Общие параметры sequence-моделей
@@ -169,15 +238,22 @@ TRANSFORMER_RANDOM_SEED = 44
 TRANSFORMER_PREDICT_BATCH_SIZE = 16384
 
 # ============================================================
-# Параметры ARIMA-like baseline
+# Параметры TCN
 # ============================================================
 
-# Используется лёгкая ARIMA-like модель:
-# AR(1) на минутной доходности return_1 для каждой бумаги.
-# Это практический baseline из ARIMA-семейства без тяжёлого statsmodels-фита
-# для миллионов строк и десятков бумаг.
-ARIMA_PHI_CLIP = 0.99
-ARIMA_MIN_OBS = 100
+TCN_CHANNELS = [192, 192, 192]
+TCN_KERNEL_SIZE = 3
+TCN_DROPOUT = 0.08
+TCN_BATCH_SIZE = 1536
+TCN_EPOCHS = 10
+TCN_LEARNING_RATE = 1e-4
+TCN_WEIGHT_DECAY = 1e-5
+TCN_RANDOM_SEED = 49
+TCN_PREDICT_BATCH_SIZE = 16384
+
+# ============================================================
+# Базовые колонки predictions
+# ============================================================
 
 BASE_PREDICTION_COLS = [
     "begin",
@@ -201,16 +277,6 @@ class NeuralRegressorWrapper:
         self.device = device
 
 
-class ArimaLikeWrapper:
-    def __init__(
-            self,
-            per_secid_params: dict[str, dict[str, float]],
-            global_params: dict[str, float],
-    ) -> None:
-        self.per_secid_params = per_secid_params
-        self.global_params = global_params
-
-
 def set_random_seed(seed: int) -> None:
     """
     Фиксирует seed для воспроизводимости.
@@ -227,10 +293,18 @@ def normalize_model_name(model_name: str) -> str:
 
     aliases = {
         "ridge": "ridge",
+        "catboost": "catboost",
+        "cb": "catboost",
+        "random_forest": "random_forest",
+        "randomforest": "random_forest",
+        "rf": "random_forest",
+        "decision_tree": "decision_tree",
+        "decisiontree": "decision_tree",
+        "dt": "decision_tree",
         "gru": "gru",
         "lstm": "lstm",
         "transformer": "transformer",
-        "arima": "arima",
+        "tcn": "tcn",
     }
 
     if normalized_name in aliases:
@@ -238,9 +312,10 @@ def normalize_model_name(model_name: str) -> str:
 
     raise ValueError(
         f"Неизвестная модель: {model_name}. "
-        "Допустимые значения: 'ridge', 'GRU', 'LSTM', 'transformer', 'ARIMA'."
+        "Допустимые значения: 'ridge', 'catboost', "
+        "'random_forest', 'decision_tree', 'GRU', 'LSTM', "
+        "'transformer', 'TCN'."
     )
-
 
 def normalize_stage_name(stage_name: str | None) -> str:
     """
@@ -342,7 +417,7 @@ def read_train_dataset(
     """
     Читает обучающую часть датасета целиком.
 
-    Используется для Ridge и ARIMA-like baseline.
+    Используется для flat ML-моделей.
     Sequence-модели обучаются по shard-файлам.
     """
     columns = [
@@ -544,24 +619,167 @@ def make_base_config(
     }
 
 
-def train_ridge_model(
+def get_ml_max_train_samples(model_name: str) -> int | None:
+    """
+    Возвращает ограничение обучающей выборки для конкретной flat ML-модели.
+    """
+    normalized_name = normalize_model_name(model_name)
+    return ML_MAX_TRAIN_SAMPLES_BY_MODEL.get(
+        normalized_name,
+        ML_MAX_TRAIN_SAMPLES,
+    )
+
+
+def sample_train_df_for_ml(train_df: pd.DataFrame, model_name: str) -> pd.DataFrame:
+    """
+    При необходимости ограничивает размер train для тяжёлых ML-моделей.
+    """
+    max_samples = get_ml_max_train_samples(model_name)
+
+    if max_samples is None:
+        log(f"{model_name}: обучаюсь на всём train: {len(train_df)} строк")
+        return train_df
+
+    max_rows = int(max_samples)
+    if len(train_df) <= max_rows:
+        log(
+            f"{model_name}: размер train {len(train_df)} <= лимита {max_rows}, "
+            "сэмплирование не требуется"
+        )
+        return train_df
+
+    seed_map = {
+        "ridge": 42,
+        "catboost": CATBOOST_RANDOM_SEED,
+        "random_forest": RANDOM_FOREST_RANDOM_SEED,
+        "decision_tree": DECISION_TREE_RANDOM_SEED,
+    }
+    random_state = seed_map.get(model_name, 42)
+
+    log(
+        f"{model_name}: ML_MAX_TRAIN_SAMPLES={max_rows}, "
+        f"сэмплирую train из {len(train_df)} строк"
+    )
+    return train_df.sample(
+        n=max_rows,
+        random_state=random_state,
+    ).sort_values(["begin", "secid"]).reset_index(drop=True)
+
+def create_ml_model(model_name: str) -> Any:
+    """
+    Создаёт одну из flat ML-моделей.
+    """
+    normalized_name = normalize_model_name(model_name)
+
+    if normalized_name == "ridge":
+        return Ridge(alpha=RIDGE_ALPHA)
+
+    if normalized_name == "catboost":
+        if CatBoostRegressor is None:
+            raise ImportError(
+                "Для модели catboost нужен пакет CatBoost. "
+                "Установи его командой: pip install catboost"
+            )
+
+        return CatBoostRegressor(
+            loss_function=CATBOOST_LOSS_FUNCTION,
+            iterations=CATBOOST_ITERATIONS,
+            learning_rate=CATBOOST_LEARNING_RATE,
+            depth=CATBOOST_DEPTH,
+            l2_leaf_reg=CATBOOST_L2_LEAF_REG,
+            task_type=CATBOOST_TASK_TYPE,
+            devices=CATBOOST_DEVICES,
+            random_seed=CATBOOST_RANDOM_SEED,
+            verbose=CATBOOST_VERBOSE,
+            allow_writing_files=False,
+        )
+
+    if normalized_name == "random_forest":
+        return RandomForestRegressor(
+            n_estimators=RANDOM_FOREST_N_ESTIMATORS,
+            max_depth=RANDOM_FOREST_MAX_DEPTH,
+            min_samples_leaf=RANDOM_FOREST_MIN_SAMPLES_LEAF,
+            max_features=RANDOM_FOREST_MAX_FEATURES,
+            random_state=RANDOM_FOREST_RANDOM_SEED,
+            n_jobs=RANDOM_FOREST_N_JOBS,
+        )
+
+    if normalized_name == "decision_tree":
+        return DecisionTreeRegressor(
+            max_depth=DECISION_TREE_MAX_DEPTH,
+            min_samples_leaf=DECISION_TREE_MIN_SAMPLES_LEAF,
+            random_state=DECISION_TREE_RANDOM_SEED,
+        )
+
+    raise ValueError(f"Не ML-модель: {model_name}")
+
+def get_ml_model_config(model_name: str) -> dict[str, Any]:
+    """
+    Возвращает config с гиперпараметрами ML-модели.
+    """
+    normalized_name = normalize_model_name(model_name)
+
+    if normalized_name == "ridge":
+        return {
+            "model_type": "Ridge",
+            "alpha": RIDGE_ALPHA,
+        }
+
+    if normalized_name == "catboost":
+        return {
+            "model_type": "CatBoostRegressor_MultiRMSE",
+            "iterations": CATBOOST_ITERATIONS,
+            "learning_rate": CATBOOST_LEARNING_RATE,
+            "depth": CATBOOST_DEPTH,
+            "l2_leaf_reg": CATBOOST_L2_LEAF_REG,
+            "loss_function": CATBOOST_LOSS_FUNCTION,
+            "task_type": CATBOOST_TASK_TYPE,
+            "devices": CATBOOST_DEVICES,
+            "random_seed": CATBOOST_RANDOM_SEED,
+            "verbose": CATBOOST_VERBOSE,
+        }
+
+    if normalized_name == "random_forest":
+        return {
+            "model_type": "RandomForestRegressor",
+            "n_estimators": RANDOM_FOREST_N_ESTIMATORS,
+            "max_depth": RANDOM_FOREST_MAX_DEPTH,
+            "min_samples_leaf": RANDOM_FOREST_MIN_SAMPLES_LEAF,
+            "max_features": RANDOM_FOREST_MAX_FEATURES,
+            "random_seed": RANDOM_FOREST_RANDOM_SEED,
+            "n_jobs": RANDOM_FOREST_N_JOBS,
+        }
+
+    if normalized_name == "decision_tree":
+        return {
+            "model_type": "DecisionTreeRegressor",
+            "max_depth": DECISION_TREE_MAX_DEPTH,
+            "min_samples_leaf": DECISION_TREE_MIN_SAMPLES_LEAF,
+            "random_seed": DECISION_TREE_RANDOM_SEED,
+        }
+
+    raise ValueError(f"Не ML-модель: {model_name}")
+
+def train_ml_model(
+        model_name: str,
         train_df: pd.DataFrame,
         train_until: str,
         stage_name: str,
 ) -> ModelArtifacts:
     """
-    Обучает multi-output Ridge-регрессию.
+    Обучает flat ML-модель на текущих строковых признаках FEATURE_COLS.
     """
-    model_name = "ridge"
-    model_dir = get_model_dir(model_name, stage_name)
+    normalized_name = normalize_model_name(model_name)
+    model_dir = get_model_dir(normalized_name, stage_name)
     model_dir.mkdir(parents=True, exist_ok=True)
 
-    model_path = model_dir / f"ridge_horizon_{HORIZON}.joblib"
+    model_path = model_dir / f"{normalized_name}_horizon_{HORIZON}.joblib"
     scaler_path = model_dir / f"scaler_horizon_{HORIZON}.joblib"
-    config_path = get_model_config_path(model_name, stage_name)
+    config_path = get_model_config_path(normalized_name, stage_name)
 
-    log("ridge: готовлю матрицу признаков и целевых значений")
+    train_df = sample_train_df_for_ml(train_df, normalized_name)
 
+    log(f"{normalized_name}: готовлю матрицу признаков и целевых значений")
     x_train = (
         train_df[FEATURE_COLS]
         .to_numpy(copy=False)
@@ -573,263 +791,80 @@ def train_ridge_model(
         .astype("float32", copy=False)
     )
 
-    log("ridge: X_train shape:", x_train.shape)
-    log("ridge: y_train shape:", y_train.shape)
+    log(f"{normalized_name}: X_train shape:", x_train.shape)
+    log(f"{normalized_name}: y_train shape:", y_train.shape)
 
-    scaler = StandardScaler(copy=False)
+    scaler: StandardScaler | None = None
 
-    log("ridge: нормализую признаки")
-    x_train_scaled = scaler.fit_transform(x_train).astype("float32", copy=False)
+    if normalized_name in TREE_BASED_MODELS:
+        # Деревьям масштабирование не нужно. Так мы не держим лишнюю копию X_train_scaled
+        # и не тратим память на StandardScaler.
+        log(f"{normalized_name}: scaler не используется для tree-based модели")
+        x_train_model = x_train
+    else:
+        scaler = StandardScaler(copy=False)
+        log(f"{normalized_name}: нормализую признаки")
+        x_train_model = scaler.fit_transform(x_train).astype("float32", copy=False)
 
-    model = Ridge(alpha=RIDGE_ALPHA)
-
-    log("ridge: обучаю multi-output Ridge-регрессию")
-    model.fit(x_train_scaled, y_train)
+    model = create_ml_model(normalized_name)
+    log(f"{normalized_name}: обучаю модель")
+    model.fit(x_train_model, y_train)
 
     joblib.dump(model, model_path)
-    joblib.dump(scaler, scaler_path)
+
+    if scaler is not None:
+        joblib.dump(scaler, scaler_path)
+        saved_scaler_path: str | None = str(scaler_path)
+        log(f"{normalized_name}: scaler сохранён:", scaler_path)
+    else:
+        saved_scaler_path = None
 
     config = make_base_config(
-        model_name=model_name,
+        model_name=normalized_name,
         train_until=train_until,
         stage_name=stage_name,
     )
+    config.update(get_ml_model_config(normalized_name))
     config.update({
-        "model_type": "Ridge",
-        "alpha": RIDGE_ALPHA,
         "model_path": str(model_path),
-        "scaler_path": str(scaler_path),
+        "scaler_path": saved_scaler_path,
+        "ml_max_train_samples": get_ml_max_train_samples(normalized_name),
     })
 
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(config, f, ensure_ascii=False, indent=2)
 
-    log("ridge: модель сохранена:", model_path)
-    log("ridge: scaler сохранён:", scaler_path)
-    log("ridge: config сохранён:", config_path)
+    log(f"{normalized_name}: модель сохранена:", model_path)
+    log(f"{normalized_name}: config сохранён:", config_path)
 
     return ModelArtifacts(
-        model_name=model_name,
+        model_name=normalized_name,
         model=model,
         scaler=scaler,
         config=config,
     )
 
-
-def predict_with_ridge(
+def predict_with_ml_model(
         artifacts: ModelArtifacts,
         split_df: pd.DataFrame,
 ) -> np.ndarray:
     """
-    Строит прогнозы Ridge.
+    Строит прогнозы flat ML-модели.
     """
-    if artifacts.scaler is None:
-        raise ValueError("Для Ridge ожидается scaler")
-
     x = (
         split_df[FEATURE_COLS]
         .to_numpy(copy=False)
         .astype("float32", copy=False)
     )
-    x_scaled = artifacts.scaler.transform(x).astype("float32", copy=False)
-    pred = artifacts.model.predict(x_scaled)
-    return pred.astype("float32", copy=False)
 
-
-def fit_ar1_params(returns: np.ndarray) -> dict[str, float]:
-    """
-    Оценивает AR(1): r[t+1] = mu + phi * (r[t] - mu) + noise.
-    """
-    returns = returns[np.isfinite(returns)]
-
-    if len(returns) < ARIMA_MIN_OBS:
-        mu = float(np.nanmean(returns)) if len(returns) > 0 else 0.0
-        return {"mu": mu, "phi": 0.0}
-
-    x = returns[:-1]
-    y = returns[1:]
-
-    mu = float(np.mean(returns))
-    x_centered = x - mu
-    y_centered = y - mu
-
-    denom = float(np.dot(x_centered, x_centered))
-
-    if denom <= 0.0:
-        phi = 0.0
+    if artifacts.scaler is None:
+        x_model = x
     else:
-        phi = float(np.dot(x_centered, y_centered) / denom)
+        x_model = artifacts.scaler.transform(x).astype("float32", copy=False)
 
-    phi = float(np.clip(phi, -ARIMA_PHI_CLIP, ARIMA_PHI_CLIP))
+    pred = artifacts.model.predict(x_model)
+    return np.asarray(pred, dtype="float32")
 
-    return {"mu": mu, "phi": phi}
-
-
-def train_arima_model(
-        train_df: pd.DataFrame,
-        train_until: str,
-        stage_name: str,
-) -> ModelArtifacts:
-    """
-    Обучает лёгкий ARIMA-like baseline: AR(1) по return_1 отдельно для каждой бумаги.
-    """
-    model_name = "arima"
-    model_dir = get_model_dir(model_name, stage_name)
-    model_dir.mkdir(parents=True, exist_ok=True)
-
-    model_path = model_dir / f"arima_horizon_{HORIZON}.joblib"
-    config_path = get_model_config_path(model_name, stage_name)
-
-    log("arima: оцениваю AR(1) параметры по каждой бумаге")
-
-    per_secid_params: dict[str, dict[str, float]] = {}
-
-    global_returns = (
-        train_df["return_1"]
-        .to_numpy(copy=False)
-        .astype("float64", copy=False)
-    )
-    global_params = fit_ar1_params(global_returns)
-
-    global_open_gap = (
-        train_df["next_open"].astype(float)
-        / train_df["close"].replace(0, np.nan).astype(float)
-        - 1.0
-    ).replace([np.inf, -np.inf], np.nan).dropna()
-
-    global_params["open_gap_mu"] = (
-        float(global_open_gap.mean()) if len(global_open_gap) > 0 else 0.0
-    )
-
-    for secid, group in train_df.groupby("secid", sort=True):
-        returns = (
-            group["return_1"]
-            .to_numpy(copy=False)
-            .astype("float64", copy=False)
-        )
-
-        params = fit_ar1_params(returns)
-
-        open_gap = (
-            group["next_open"].astype(float)
-            / group["close"].replace(0, np.nan).astype(float)
-            - 1.0
-        ).replace([np.inf, -np.inf], np.nan).dropna()
-
-        params["open_gap_mu"] = (
-            float(open_gap.mean())
-            if len(open_gap) > 0
-            else global_params["open_gap_mu"]
-        )
-
-        per_secid_params[str(secid)] = params
-
-    wrapper = ArimaLikeWrapper(
-        per_secid_params=per_secid_params,
-        global_params=global_params,
-    )
-
-    joblib.dump(wrapper, model_path)
-
-    config = make_base_config(
-        model_name=model_name,
-        train_until=train_until,
-        stage_name=stage_name,
-    )
-    config.update({
-        "model_type": "ARIMA_like_AR1_on_return_1",
-        "arima_phi_clip": ARIMA_PHI_CLIP,
-        "arima_min_obs": ARIMA_MIN_OBS,
-        "model_path": str(model_path),
-        "scaler_path": None,
-    })
-
-    with open(config_path, "w", encoding="utf-8") as f:
-        json.dump(config, f, ensure_ascii=False, indent=2)
-
-    log("arima: модель сохранена:", model_path)
-    log("arima: config сохранён:", config_path)
-
-    return ModelArtifacts(
-        model_name=model_name,
-        model=wrapper,
-        scaler=None,
-        config=config,
-    )
-
-
-def ar1_cumulative_forecast(
-        current_return: np.ndarray,
-        mu: float,
-        phi: float,
-        horizon_count: int,
-) -> np.ndarray:
-    """
-    Возвращает ожидаемую накопленную доходность для горизонтов 1..horizon_count.
-    """
-    n = len(current_return)
-    result = np.zeros((n, horizon_count), dtype="float32")
-
-    expected_next = current_return.astype("float64", copy=False)
-    cumulative = np.zeros(n, dtype="float64")
-
-    for horizon in range(1, horizon_count + 1):
-        expected_next = mu + phi * (expected_next - mu)
-        cumulative += expected_next
-        result[:, horizon - 1] = cumulative.astype("float32")
-
-    return result
-
-
-def predict_with_arima(
-        artifacts: ModelArtifacts,
-        split_df: pd.DataFrame,
-) -> np.ndarray:
-    """
-    Строит прогнозы ARIMA-like baseline.
-    """
-    wrapper: ArimaLikeWrapper = artifacts.model
-    n = len(split_df)
-    execution_count = len(EXECUTION_TARGET_COLS)
-    hold_count = len(HOLD_TARGET_COLS)
-
-    pred = np.zeros((n, execution_count + hold_count), dtype="float32")
-
-    for secid, group in split_df.groupby("secid", sort=False):
-        positions = group.index.to_numpy(dtype=np.int64, copy=False)
-
-        params = wrapper.per_secid_params.get(
-            str(secid),
-            wrapper.global_params,
-        )
-
-        mu = float(params.get("mu", 0.0))
-        phi = float(params.get("phi", 0.0))
-        open_gap_mu = float(params.get("open_gap_mu", 0.0))
-
-        current_return = (
-            group["return_1"]
-            .to_numpy(copy=False)
-            .astype("float64", copy=False)
-        )
-
-        hold_pred = ar1_cumulative_forecast(
-            current_return=current_return,
-            mu=mu,
-            phi=phi,
-            horizon_count=hold_count,
-        )
-
-        execution_pred = (
-            (1.0 + hold_pred.astype("float64"))
-            / (1.0 + open_gap_mu)
-            - 1.0
-        ).astype("float32")
-
-        pred[positions, :execution_count] = execution_pred[:, :execution_count]
-        pred[positions, execution_count:] = hold_pred[:, :hold_count]
-
-    return pred
 
 class SequenceIndexDataset:
     def __init__(
@@ -1240,7 +1275,7 @@ def create_sequence_model(
         output_size: int,
 ):
     """
-    Создаёт GRU/LSTM/Transformer-регрессор.
+    Создаёт GRU/LSTM/Transformer/TCN-регрессор.
     """
     import torch
     from torch import nn
@@ -1339,6 +1374,98 @@ def create_sequence_model(
 
         return TransformerRegressor()
 
+    if normalized_name == "tcn":
+        class TemporalBlock(nn.Module):
+            def __init__(
+                    self,
+                    in_channels: int,
+                    out_channels: int,
+                    kernel_size: int,
+                    dilation: int,
+                    dropout: float,
+            ) -> None:
+                super().__init__()
+                padding = (kernel_size - 1) * dilation
+
+                self.conv1 = nn.Conv1d(
+                    in_channels,
+                    out_channels,
+                    kernel_size=kernel_size,
+                    padding=padding,
+                    dilation=dilation,
+                )
+                self.conv2 = nn.Conv1d(
+                    out_channels,
+                    out_channels,
+                    kernel_size=kernel_size,
+                    padding=padding,
+                    dilation=dilation,
+                )
+                self.activation = nn.GELU()
+                self.dropout = nn.Dropout(dropout)
+                self.downsample = (
+                    nn.Conv1d(in_channels, out_channels, kernel_size=1)
+                    if in_channels != out_channels
+                    else None
+                )
+
+            def chomp(self, x, padding: int):
+                if padding == 0:
+                    return x
+                return x[:, :, :-padding]
+
+            def forward(self, x):
+                padding = (TCN_KERNEL_SIZE - 1) * self.conv1.dilation[0]
+                out = self.conv1(x)
+                out = self.chomp(out, padding)
+                out = self.activation(out)
+                out = self.dropout(out)
+
+                out = self.conv2(out)
+                out = self.chomp(out, padding)
+                out = self.activation(out)
+                out = self.dropout(out)
+
+                residual = x if self.downsample is None else self.downsample(x)
+                return out + residual
+
+        class TcnRegressor(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                layers = []
+                in_channels = input_size
+
+                for layer_idx, out_channels in enumerate(TCN_CHANNELS):
+                    dilation = 2 ** layer_idx
+                    layers.append(
+                        TemporalBlock(
+                            in_channels=in_channels,
+                            out_channels=int(out_channels),
+                            kernel_size=TCN_KERNEL_SIZE,
+                            dilation=dilation,
+                            dropout=TCN_DROPOUT,
+                        )
+                    )
+                    in_channels = int(out_channels)
+
+                self.network = nn.Sequential(*layers)
+                self.head = nn.Sequential(
+                    nn.LayerNorm(int(TCN_CHANNELS[-1])),
+                    nn.Linear(int(TCN_CHANNELS[-1]), int(TCN_CHANNELS[-1])),
+                    nn.GELU(),
+                    nn.Dropout(TCN_DROPOUT),
+                    nn.Linear(int(TCN_CHANNELS[-1]), output_size),
+                )
+
+            def forward(self, x):
+                # Conv1d ожидает [batch, features, time].
+                x = x.transpose(1, 2)
+                out = self.network(x)
+                last = out[:, :, -1]
+                return self.head(last)
+
+        return TcnRegressor()
+
     raise ValueError(f"Не sequence-модель: {model_name}")
 
 
@@ -1396,6 +1523,20 @@ def get_sequence_hyperparams(model_name: str) -> dict[str, Any]:
             "grad_clip_norm": TRANSFORMER_GRAD_CLIP_NORM,
         }
 
+    if normalized_name == "tcn":
+        return {
+            "batch_size": TCN_BATCH_SIZE,
+            "epochs": TCN_EPOCHS,
+            "learning_rate": TCN_LEARNING_RATE,
+            "weight_decay": TCN_WEIGHT_DECAY,
+            "random_seed": TCN_RANDOM_SEED,
+            "predict_batch_size": TCN_PREDICT_BATCH_SIZE,
+            "model_type": "TCN",
+            "channels": TCN_CHANNELS,
+            "kernel_size": TCN_KERNEL_SIZE,
+            "dropout": TCN_DROPOUT,
+        }
+
     raise ValueError(f"Не sequence-модель: {model_name}")
 
 
@@ -1405,7 +1546,7 @@ def train_sequence_model(
         stage_name: str,
 ) -> ModelArtifacts:
     """
-    Обучает GRU/LSTM/Transformer через shard-файлы, не загружая весь train в память.
+    Обучает GRU/LSTM/Transformer/TCN через shard-файлы, не загружая весь train в память.
     """
     try:
         import torch
@@ -1730,7 +1871,7 @@ def predict_with_sequence_model(
         split_df: pd.DataFrame,
 ) -> np.ndarray:
     """
-    Строит прогнозы GRU/LSTM/Transformer.
+    Строит прогнозы GRU/LSTM/Transformer/TCN.
     """
     import torch
 
@@ -1808,31 +1949,20 @@ def train_model_by_name(
     """
     normalized_name = normalize_model_name(model_name)
 
-    if normalized_name == "ridge":
+    if normalized_name in {"ridge", "catboost", "random_forest", "decision_tree"}:
         if train_df is None:
             train_df = read_train_dataset(
                 train_until=train_until,
                 split_name=stage_name,
             )
-        return train_ridge_model(
+        return train_ml_model(
+            model_name=normalized_name,
             train_df=train_df,
             train_until=train_until,
             stage_name=stage_name,
         )
 
-    if normalized_name == "arima":
-        if train_df is None:
-            train_df = read_train_dataset(
-                train_until=train_until,
-                split_name=stage_name,
-            )
-        return train_arima_model(
-            train_df=train_df,
-            train_until=train_until,
-            stage_name=stage_name,
-        )
-
-    if normalized_name in {"gru", "lstm", "transformer"}:
+    if normalized_name in {"gru", "lstm", "transformer", "tcn"}:
         return train_sequence_model(
             model_name=normalized_name,
             train_until=train_until,
@@ -1855,16 +1985,25 @@ def train_model_interface(
     """
     normalized_name = normalize_model_name(model_name)
 
-    if normalized_name in {"ridge", "arima"}:
-        train_df = read_train_dataset(
+    if normalized_name in {"ridge", "catboost", "random_forest", "decision_tree"}:
+        full_train_df = read_train_dataset(
             train_until=train_until,
             split_name=stage_name,
         )
 
         log(
             f"{normalized_name}: размер обучающего датасета "
-            f"для stage={stage_name}: {train_df.shape}"
+            f"для stage={stage_name}: {full_train_df.shape}"
         )
+
+        train_df = sample_train_df_for_ml(full_train_df, normalized_name)
+
+        if train_df is not full_train_df:
+            log(
+                f"{normalized_name}: после сэмплирования train shape: "
+                f"{train_df.shape}"
+            )
+            del full_train_df
 
         return train_model_by_name(
             model_name=normalized_name,
@@ -1880,7 +2019,6 @@ def train_model_interface(
         stage_name=stage_name,
     )
 
-
 def predict_by_model_name(
         artifacts: ModelArtifacts,
         split_df: pd.DataFrame,
@@ -1890,13 +2028,10 @@ def predict_by_model_name(
     """
     model_name = normalize_model_name(artifacts.model_name)
 
-    if model_name == "ridge":
-        return predict_with_ridge(artifacts, split_df)
+    if model_name in {"ridge", "catboost", "random_forest", "decision_tree"}:
+        return predict_with_ml_model(artifacts, split_df)
 
-    if model_name == "arima":
-        return predict_with_arima(artifacts, split_df)
-
-    if model_name in {"gru", "lstm", "transformer"}:
+    if model_name in {"gru", "lstm", "transformer", "tcn"}:
         return predict_with_sequence_model(artifacts, split_df)
 
     raise ValueError(f"Неизвестная модель: {artifacts.model_name}")
@@ -1952,7 +2087,9 @@ def main() -> None:
     Подбор threshold_bp/max_positions здесь не выполняется. Этим занимается
     только backtest_strategy.py на готовых prediction-файлах.
     """
-    log("Модели для обучения:", TO_TRAIN)
+    log("ML-модели для обучения:", ML_MODELS_TO_TRAIN)
+    log("Нейросетевые модели для обучения:", NEURAL_MODELS_TO_TRAIN)
+    log("Все модели для обучения:", TO_TRAIN)
     log("HORIZON:", HORIZON)
     log("WINDOW_SIZE:", WINDOW_SIZE)
     log("Количество признаков:", len(FEATURE_COLS))
@@ -1963,7 +2100,7 @@ def main() -> None:
     if not TO_TRAIN:
         raise ValueError(
             "TO_TRAIN пустой. Укажи хотя бы одну модель, например: "
-            "TO_TRAIN = ['ridge'] или TO_TRAIN = ['GRU']."
+            "ML_MODELS_TO_TRAIN = ['ridge'] или NEURAL_MODELS_TO_TRAIN = ['GRU']."
         )
 
     for model_name in TO_TRAIN:

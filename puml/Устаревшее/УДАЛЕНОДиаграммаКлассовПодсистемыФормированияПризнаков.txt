@@ -1,0 +1,122 @@
+@startuml
+title UML-диаграмма классов подсистемы формирования признаков
+
+top to bottom direction
+skinparam shadowing false
+skinparam classAttributeIconSize 0
+skinparam linetype ortho
+skinparam nodesep 28
+skinparam ranksep 32
+
+class "Подготовленные минутные данные" as PreparedMinuteDataset {
+  -records
+  +get_row_count()
+}
+
+class "Конвейер формирования признаков" as FeatureEngineeringPipeline {
+  +add_basic_time_features(data)
+  +add_cyclic_time_features(data)
+  +add_return_lag_features(data)
+  +add_volume_features(data)
+  +add_rolling_features(data)
+  +add_volatility_features(data)
+  +add_candle_shape_features(data)
+  +build_feature_vector(data): FeatureVector
+}
+
+class "Вектор признаков" as FeatureVector {
+  -basic_time_features
+  -cyclic_time_features
+  -return_lag_features
+  -volume_features
+  -rolling_features
+  -volatility_features
+  -candle_shape_features
+  +to_matrix()
+}
+
+class "Базовые временные признаки" as BasicTimeFeatures {
+  -hour
+  -minute
+  -minute_from_midnight
+  -day_of_week
+  -day_of_month
+  -month
+  -days_in_month
+  -is_month_start
+  -is_month_end
+}
+
+class "Циклические временные признаки" as CyclicTimeFeatures {
+  -hour_sin
+  -hour_cos
+  -minute_sin
+  -minute_cos
+  -minute_from_midnight_sin
+  -minute_from_midnight_cos
+  -day_of_week_sin
+  -day_of_week_cos
+  -month_sin
+  -month_cos
+  -day_of_month_sin
+  -day_of_month_cos
+}
+
+class "Лаговые признаки доходности" as ReturnLagFeatures {
+  -return_1
+  -return_2
+  -return_3
+  -return_5
+  -return_10
+  -return_15
+  -return_30
+}
+
+class "Признаки объёма и оборота" as VolumeFeatures {
+  -log_volume
+  -log_value
+  -log_volume_diff_1
+  -log_value_diff_1
+  -log_volume_ma_5
+  -log_value_ma_5
+}
+
+class "Скользящие характеристики" as RollingFeatures {
+  -ma_close_5
+  -ma_close_15
+  -ma_close_30
+  -close_to_ma_5
+  -close_to_ma_15
+}
+
+class "Признаки изменчивости" as VolatilityFeatures {
+  -volatility_5
+  -volatility_15
+  -hl_range
+}
+
+class "Признаки геометрии свечи" as CandleShapeFeatures {
+  -body
+  -upper_wick
+  -lower_wick
+}
+
+PreparedMinuteDataset --> FeatureEngineeringPipeline : вход
+FeatureEngineeringPipeline --> FeatureVector : формирует
+
+FeatureEngineeringPipeline ..> BasicTimeFeatures : добавляет
+FeatureEngineeringPipeline ..> CyclicTimeFeatures : добавляет
+FeatureEngineeringPipeline ..> ReturnLagFeatures : добавляет
+FeatureEngineeringPipeline ..> VolumeFeatures : добавляет
+FeatureEngineeringPipeline ..> RollingFeatures : добавляет
+FeatureEngineeringPipeline ..> VolatilityFeatures : добавляет
+FeatureEngineeringPipeline ..> CandleShapeFeatures : добавляет
+
+FeatureVector *-- BasicTimeFeatures
+FeatureVector *-- CyclicTimeFeatures
+FeatureVector *-- ReturnLagFeatures
+FeatureVector *-- VolumeFeatures
+FeatureVector *-- RollingFeatures
+FeatureVector *-- VolatilityFeatures
+FeatureVector *-- CandleShapeFeatures
+@enduml
