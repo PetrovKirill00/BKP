@@ -1,0 +1,43 @@
+@startuml
+title UML-диаграмма деятельности формирования прогнозов для исторического тестирования
+
+skinparam componentStyle rectangle
+skinparam shadowing false
+skinparam defaultFontName Arial
+skinparam ArrowColor #444444
+
+database "minute_dataset.parquet" as dataset
+
+component "Разделение данных\nпо времени" as split
+component "Train" as train
+component "Validation" as valid
+component "Test" as test
+
+component "Обучение\nvalidation-модели" as train_valid_model
+artifact "valid_predictions.parquet" as valid_pred
+
+component "Обучение\nfinal-модели" as train_final_model
+artifact "test_predictions.parquet" as test_pred
+
+component "Модуль исторического\nтестирования" as backtest
+
+dataset --> split
+
+split --> train
+split --> valid
+split --> test
+
+train --> train_valid_model
+valid --> train_valid_model : прогноз
+
+train_valid_model --> valid_pred
+
+train --> train_final_model
+valid --> train_final_model
+test --> train_final_model : прогноз
+
+train_final_model --> test_pred
+
+valid_pred --> backtest
+test_pred --> backtest
+@enduml

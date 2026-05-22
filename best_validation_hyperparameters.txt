@@ -1,0 +1,61 @@
+Лучшие торговые гиперпараметры по результатам validation
+
+[momentum]
+  threshold_bp=80, max_positions=1, buy_cost_bp=1, sell_cost_bp=1
+  threshold_bp=120, max_positions=1, buy_cost_bp=3, sell_cost_bp=3
+  threshold_bp=140, max_positions=1, buy_cost_bp=5, sell_cost_bp=5
+
+[mean_reversion]
+  threshold_bp=0, max_positions=50, buy_cost_bp=1, sell_cost_bp=1
+  threshold_bp=50, max_positions=40, buy_cost_bp=3, sell_cost_bp=3
+  threshold_bp=100, max_positions=12, buy_cost_bp=5, sell_cost_bp=5
+
+[ma_trend]
+  threshold_bp=70, max_positions=1, buy_cost_bp=1, sell_cost_bp=1
+  threshold_bp=80, max_positions=1, buy_cost_bp=3, sell_cost_bp=3
+  threshold_bp=120, max_positions=1, buy_cost_bp=5, sell_cost_bp=5
+
+[breakout]
+  threshold_bp=70, max_positions=1, buy_cost_bp=1, sell_cost_bp=1
+  threshold_bp=80, max_positions=1, buy_cost_bp=3, sell_cost_bp=3
+  threshold_bp=120, max_positions=1, buy_cost_bp=5, sell_cost_bp=5
+
+[ridge]
+  threshold_bp=0, max_positions=7, buy_cost_bp=1, sell_cost_bp=1
+  threshold_bp=22, max_positions=4, buy_cost_bp=3, sell_cost_bp=3
+  threshold_bp=26, max_positions=2, buy_cost_bp=5, sell_cost_bp=5
+
+[catboost]
+  threshold_bp=0, max_positions=50, buy_cost_bp=1, sell_cost_bp=1
+  threshold_bp=1, max_positions=7, buy_cost_bp=3, sell_cost_bp=3
+  threshold_bp=28, max_positions=6, buy_cost_bp=5, sell_cost_bp=5
+
+[random_forest]
+  threshold_bp=0, max_positions=11, buy_cost_bp=1, sell_cost_bp=1
+  threshold_bp=8, max_positions=7, buy_cost_bp=3, sell_cost_bp=3
+  threshold_bp=16, max_positions=5, buy_cost_bp=5, sell_cost_bp=5
+
+[decision_tree]
+  threshold_bp=0, max_positions=10, buy_cost_bp=1, sell_cost_bp=1
+  threshold_bp=8, max_positions=5, buy_cost_bp=3, sell_cost_bp=3
+  threshold_bp=32, max_positions=3, buy_cost_bp=5, sell_cost_bp=5
+
+[gru]
+  threshold_bp=4, max_positions=11, buy_cost_bp=1, sell_cost_bp=1
+  threshold_bp=30, max_positions=5, buy_cost_bp=3, sell_cost_bp=3
+  threshold_bp=45, max_positions=1, buy_cost_bp=5, sell_cost_bp=5
+
+[lstm]
+  threshold_bp=0, max_positions=10, buy_cost_bp=1, sell_cost_bp=1
+  threshold_bp=18, max_positions=5, buy_cost_bp=3, sell_cost_bp=3
+  threshold_bp=45, max_positions=1, buy_cost_bp=5, sell_cost_bp=5
+
+[transformer]
+  threshold_bp=3, max_positions=15, buy_cost_bp=1, sell_cost_bp=1
+  threshold_bp=22, max_positions=3, buy_cost_bp=3, sell_cost_bp=3
+  threshold_bp=55, max_positions=1, buy_cost_bp=5, sell_cost_bp=5
+
+[tcn]
+  threshold_bp=0, max_positions=12, buy_cost_bp=1, sell_cost_bp=1
+  threshold_bp=8, max_positions=7, buy_cost_bp=3, sell_cost_bp=3
+  threshold_bp=26, max_positions=5, buy_cost_bp=5, sell_cost_bp=5

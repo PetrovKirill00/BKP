@@ -100,15 +100,31 @@ RIDGE_ALPHA = 1.0
 # CatBoostRegressor используется как отдельная flat ML-модель.
 # Модель умеет multi-target regression через loss_function="MultiRMSE"
 # и может использовать GPU.
-CATBOOST_ITERATIONS = 300
-CATBOOST_LEARNING_RATE = 0.05
-CATBOOST_DEPTH = 8
-CATBOOST_L2_LEAF_REG = 3.0
+CATBOOST_ITERATIONS = 2000
+CATBOOST_LEARNING_RATE = 0.03
+CATBOOST_DEPTH = 7
+CATBOOST_L2_LEAF_REG = 10.0
+
 CATBOOST_LOSS_FUNCTION = "MultiRMSE"
-CATBOOST_TASK_TYPE = "GPU"   # Если GPU-режим не запустится, поменяй на "CPU".
-CATBOOST_DEVICES = "0"
+CATBOOST_EVAL_METRIC = "MultiRMSE"
+
+CATBOOST_BOOTSTRAP_TYPE = "Bernoulli"
+CATBOOST_SUBSAMPLE = 0.8
+CATBOOST_RANDOM_STRENGTH = 1.0
+
+CATBOOST_OD_TYPE = "Iter"
+CATBOOST_OD_WAIT = 100
+CATBOOST_USE_BEST_MODEL = True
+
 CATBOOST_RANDOM_SEED = 46
 CATBOOST_VERBOSE = 50
+
+# GPU-режим CatBoost. Для возврата на CPU поменяй на "CPU".
+# "0" означает первую CUDA GPU. Для нескольких GPU можно указать "0:1"
+# или диапазон вроде "0-1".
+CATBOOST_TASK_TYPE = "GPU"
+CATBOOST_DEVICES = "0"
+CATBOOST_THREAD_COUNT = -1
 
 # RandomForestRegressor умеет multi-output regression сам.
 # Ограничиваем число признаков на split и число потоков, чтобы не взрывать RAM.
@@ -127,11 +143,12 @@ DECISION_TREE_RANDOM_SEED = 48
 ML_MAX_TRAIN_SAMPLES = None
 
 # Индивидуальные ограничения для тяжёлых flat ML-моделей.
-# Ridge оставляем на всём датасете, деревья учим на большой подвыборке:
-# этого достаточно для baseline-сравнения и не блокирует pipeline на часы.
+# Ridge оставляем на всём датасете. Для CatBoost на GPU ограничиваем train,
+# чтобы не упираться в VRAM. Ограничение берёт самые новые строки по begin,
+# а не случайную подвыборку.
 ML_MAX_TRAIN_SAMPLES_BY_MODEL = {
     "ridge": None,
-    "catboost": 16_777_216,
+    "catboost": 22_000_000,
     "random_forest": None,
     "decision_tree": None,
 }
@@ -633,6 +650,10 @@ def get_ml_max_train_samples(model_name: str) -> int | None:
 def sample_train_df_for_ml(train_df: pd.DataFrame, model_name: str) -> pd.DataFrame:
     """
     При необходимости ограничивает размер train для тяжёлых ML-моделей.
+
+    Важно: ограничение берёт не случайные строки, а последние max_rows строк
+    по времени begin. Это лучше соответствует временной природе задачи:
+    модель обучается на самой свежей доступной части train-периода.
     """
     max_samples = get_ml_max_train_samples(model_name)
 
@@ -641,29 +662,30 @@ def sample_train_df_for_ml(train_df: pd.DataFrame, model_name: str) -> pd.DataFr
         return train_df
 
     max_rows = int(max_samples)
+    if max_rows <= 0:
+        raise ValueError(
+            f"{model_name}: ML_MAX_TRAIN_SAMPLES должен быть положительным "
+            f"числом или None, получено: {max_samples}"
+        )
+
     if len(train_df) <= max_rows:
         log(
             f"{model_name}: размер train {len(train_df)} <= лимита {max_rows}, "
-            "сэмплирование не требуется"
+            "ограничение train не требуется"
         )
-        return train_df
-
-    seed_map = {
-        "ridge": 42,
-        "catboost": CATBOOST_RANDOM_SEED,
-        "random_forest": RANDOM_FOREST_RANDOM_SEED,
-        "decision_tree": DECISION_TREE_RANDOM_SEED,
-    }
-    random_state = seed_map.get(model_name, 42)
+        return train_df.sort_values(["begin", "secid"]).reset_index(drop=True)
 
     log(
         f"{model_name}: ML_MAX_TRAIN_SAMPLES={max_rows}, "
-        f"сэмплирую train из {len(train_df)} строк"
+        f"беру последние {max_rows} строк из {len(train_df)} по begin"
     )
-    return train_df.sample(
-        n=max_rows,
-        random_state=random_state,
-    ).sort_values(["begin", "secid"]).reset_index(drop=True)
+
+    return (
+        train_df
+        .sort_values(["begin", "secid"], kind="mergesort")
+        .tail(max_rows)
+        .reset_index(drop=True)
+    )
 
 def create_ml_model(model_name: str) -> Any:
     """
@@ -681,18 +703,38 @@ def create_ml_model(model_name: str) -> Any:
                 "Установи его командой: pip install catboost"
             )
 
-        return CatBoostRegressor(
-            loss_function=CATBOOST_LOSS_FUNCTION,
-            iterations=CATBOOST_ITERATIONS,
-            learning_rate=CATBOOST_LEARNING_RATE,
-            depth=CATBOOST_DEPTH,
-            l2_leaf_reg=CATBOOST_L2_LEAF_REG,
-            task_type=CATBOOST_TASK_TYPE,
-            devices=CATBOOST_DEVICES,
-            random_seed=CATBOOST_RANDOM_SEED,
-            verbose=CATBOOST_VERBOSE,
-            allow_writing_files=False,
-        )
+        task_type = CATBOOST_TASK_TYPE.upper()
+
+        catboost_params = {
+            "loss_function": CATBOOST_LOSS_FUNCTION,
+            "eval_metric": CATBOOST_EVAL_METRIC,
+            "iterations": CATBOOST_ITERATIONS,
+            "learning_rate": CATBOOST_LEARNING_RATE,
+            "depth": CATBOOST_DEPTH,
+            "l2_leaf_reg": CATBOOST_L2_LEAF_REG,
+            "bootstrap_type": CATBOOST_BOOTSTRAP_TYPE,
+            "subsample": CATBOOST_SUBSAMPLE,
+            "task_type": task_type,
+            "random_seed": CATBOOST_RANDOM_SEED,
+            "verbose": CATBOOST_VERBOSE,
+            "allow_writing_files": False,
+        }
+
+        if task_type == "GPU":
+            catboost_params["devices"] = CATBOOST_DEVICES
+        elif task_type == "CPU":
+            catboost_params["thread_count"] = CATBOOST_THREAD_COUNT
+
+            # random_strength в документации CatBoost указан как CPU-only
+            # параметр, поэтому не передаём его при GPU-обучении.
+            catboost_params["random_strength"] = CATBOOST_RANDOM_STRENGTH
+        else:
+            raise ValueError(
+                "CATBOOST_TASK_TYPE должен быть 'CPU' или 'GPU', "
+                f"получено: {CATBOOST_TASK_TYPE!r}"
+            )
+
+        return CatBoostRegressor(**catboost_params)
 
     if normalized_name == "random_forest":
         return RandomForestRegressor(
@@ -733,8 +775,12 @@ def get_ml_model_config(model_name: str) -> dict[str, Any]:
             "depth": CATBOOST_DEPTH,
             "l2_leaf_reg": CATBOOST_L2_LEAF_REG,
             "loss_function": CATBOOST_LOSS_FUNCTION,
+            "eval_metric": CATBOOST_EVAL_METRIC,
+            "bootstrap_type": CATBOOST_BOOTSTRAP_TYPE,
+            "subsample": CATBOOST_SUBSAMPLE,
             "task_type": CATBOOST_TASK_TYPE,
-            "devices": CATBOOST_DEVICES,
+            "devices": CATBOOST_DEVICES if CATBOOST_TASK_TYPE.upper() == "GPU" else None,
+            "thread_count": CATBOOST_THREAD_COUNT if CATBOOST_TASK_TYPE.upper() == "CPU" else None,
             "random_seed": CATBOOST_RANDOM_SEED,
             "verbose": CATBOOST_VERBOSE,
         }
@@ -807,6 +853,13 @@ def train_ml_model(
         x_train_model = scaler.fit_transform(x_train).astype("float32", copy=False)
 
     model = create_ml_model(normalized_name)
+
+    if normalized_name == "catboost":
+        log(
+            f"{normalized_name}: CatBoost task_type={CATBOOST_TASK_TYPE}, "
+            f"devices={CATBOOST_DEVICES if CATBOOST_TASK_TYPE.upper() == 'GPU' else 'CPU'}"
+        )
+
     log(f"{normalized_name}: обучаю модель")
     model.fit(x_train_model, y_train)
 
@@ -829,6 +882,7 @@ def train_ml_model(
         "model_path": str(model_path),
         "scaler_path": saved_scaler_path,
         "ml_max_train_samples": get_ml_max_train_samples(normalized_name),
+        "ml_train_sample_strategy": "latest_rows_by_begin",
     })
 
     with open(config_path, "w", encoding="utf-8") as f:

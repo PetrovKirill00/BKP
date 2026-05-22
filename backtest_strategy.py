@@ -1,4 +1,6 @@
 import json
+import os
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -6,11 +8,17 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from constants import HORIZON
 from validation_hyperparameters import (
     RUN_VALIDATION_BACKTEST,
     RUN_TEST_BACKTEST,
     VALIDATION_PARAMETER_GRIDS,
 )
+
+try:
+    from validation_hyperparameters import BACKTEST_STRATEGIES as CONFIG_BACKTEST_STRATEGIES
+except ImportError:
+    CONFIG_BACKTEST_STRATEGIES = None
 
 
 DATA_ROOT = Path("data")
@@ -22,8 +30,8 @@ DATA_ROOT = Path("data")
 
 RESULTS_DIR = Path("backtest_results")
 
-BEST_VALIDATION_HYPERPARAMETERS_PY_PATH = Path("best_validation_hyper_parameters.py")
-BEST_VALIDATION_HYPERPARAMETERS_TEXT_PATH = Path("best_validation_hyper_parameters.txt")
+BEST_VALIDATION_HYPERPARAMETERS_PY_PATH = Path("best_validation_hyperparameters.py")
+BEST_VALIDATION_HYPERPARAMETERS_TEXT_PATH = Path("best_validation_hyperparameters.txt")
 
 INITIAL_CASH = 1_000_000.0
 
@@ -51,6 +59,9 @@ BACKTEST_STRATEGIES = [
     "transformer",
     "tcn",
 ]
+
+if CONFIG_BACKTEST_STRATEGIES is not None:
+    BACKTEST_STRATEGIES = list(CONFIG_BACKTEST_STRATEGIES)
 
 RULE_BASED_STRATEGIES = {
     "momentum",
@@ -158,6 +169,18 @@ HOLD_EXTRA_BUFFER_BP = 0.0
 
 VERBOSE = True
 
+LOG_FILE_PATH = Path("logs.txt")
+RESET_LOG_ON_START = True
+
+# Количество параллельных workers для перебора торговых параметров.
+# 1  -> последовательный режим, как раньше.
+# >1 -> параллельно тестируются несколько комбинаций параметров.
+BACKTEST_N_JOBS = 16
+
+# "process" обычно быстрее для CPU-bound backtest, но потребляет больше памяти.
+# "thread" потребляет меньше памяти, но ускорение может быть слабее из-за GIL.
+BACKTEST_PARALLEL_BACKEND = "process"
+
 
 def normalize_model_name(model_name: str) -> str:
     """
@@ -241,9 +264,40 @@ def safe_print(message: str = "") -> None:
     except OSError:
         pass
 
+
+def safe_write_log_file(message: str) -> None:
+    """
+    Безопасно дописывает строку лога в logs.txt.
+
+    Файл открывается на каждую запись отдельно. Это проще и устойчивее при
+    параллельном выполнении нескольких workers.
+    """
+    if LOG_FILE_PATH is None:
+        return
+
+    try:
+        with open(LOG_FILE_PATH, "a", encoding="utf-8") as f:
+            f.write(message + "\n")
+    except OSError:
+        pass
+
+
+def reset_log_file() -> None:
+    """
+    Очищает logs.txt в начале нового запуска, если включён RESET_LOG_ON_START.
+    """
+    if LOG_FILE_PATH is None or not RESET_LOG_ON_START:
+        return
+
+    try:
+        LOG_FILE_PATH.write_text("", encoding="utf-8")
+    except OSError:
+        pass
+
+
 def log(message: str) -> None:
     """
-    Безопасно печатает диагностическое сообщение.
+    Безопасно печатает диагностическое сообщение в консоль и logs.txt.
 
     Если PyCharm/Windows stdout падает с OSError,
     backtest не останавливается.
@@ -252,7 +306,9 @@ def log(message: str) -> None:
         return
 
     now = datetime.now().strftime("%H:%M:%S")
-    safe_print(f"[{now}] {message}")
+    formatted = f"[{now}][pid={os.getpid()}] {message}"
+    safe_print(formatted)
+    safe_write_log_file(formatted)
 
 
 def get_model_file_prefix(model_name: str) -> str:
@@ -1346,6 +1402,264 @@ def calculate_backtest_metrics(
     return metrics
 
 
+
+_PARALLEL_BACKTEST_WORK: pd.DataFrame | None = None
+
+
+def _init_parallel_backtest_worker(work: pd.DataFrame) -> None:
+    """
+    Инициализирует общий DataFrame в worker-процессе.
+
+    Это позволяет не передавать большой набор данных отдельно в каждую задачу.
+    """
+    global _PARALLEL_BACKTEST_WORK
+    _PARALLEL_BACKTEST_WORK = work
+
+
+def _run_single_parameter_combo_from_global(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """
+    Запускает одну комбинацию параметров в worker-процессе.
+    """
+    if _PARALLEL_BACKTEST_WORK is None:
+        raise RuntimeError("Worker не получил DataFrame для backtest.")
+
+    return run_single_parameter_combo(
+        work=_PARALLEL_BACKTEST_WORK,
+        **kwargs,
+    )
+
+
+def run_single_parameter_combo(
+        work: pd.DataFrame,
+        name: str,
+        params: dict[str, float | int],
+        combo_idx: int,
+        total_combos: int,
+        progress_every_minutes: int,
+        save_details: bool,
+        model_name: str,
+        results_dir: Path,
+        initial_cash: float = INITIAL_CASH,
+) -> dict[str, Any]:
+    """
+    Выполняет backtest для одной комбинации торговых параметров.
+
+    Эта функция вынесена отдельно, чтобы её можно было запускать параллельно
+    для разных threshold/max_positions/cost.
+    """
+    grouped_by_minute = work.groupby("begin", sort=False)
+    unique_minutes = work["begin"].nunique()
+    final_time = work["begin"].iloc[-1]
+
+    threshold_bp = float(params["threshold_bp"])
+    max_positions = int(params["max_positions"])
+    buy_cost_bp = float(params["buy_cost_bp"])
+    sell_cost_bp = float(params["sell_cost_bp"])
+
+    threshold = bp_to_return(threshold_bp)
+    buy_cost = bp_to_return(buy_cost_bp)
+    sell_cost = bp_to_return(sell_cost_bp)
+
+    log(
+        f"{name}: combo {combo_idx}/{total_combos}: "
+        f"threshold={threshold_bp}bp, "
+        f"max_positions={max_positions}, "
+        f"buy_cost={buy_cost_bp}bp, "
+        f"sell_cost={sell_cost_bp}bp"
+    )
+
+    cash = initial_cash
+    open_positions = []
+
+    equity_history = []
+    trade_events = []
+    closed_trades = []
+
+    last_minute_by_secid: pd.DataFrame | None = None
+
+    opened_total = 0
+    closed_total = 0
+    closed_by_max_hold = 0
+    closed_by_forecast = 0
+
+    minute_idx = 0
+
+    for begin, minute_data in grouped_by_minute:
+        minute_idx += 1
+
+        if (
+                minute_idx == 1
+                or minute_idx % progress_every_minutes == 0
+                or minute_idx == unique_minutes
+        ):
+            log(
+                f"{name}: combo {combo_idx}/{total_combos}, "
+                f"minute {minute_idx}/{unique_minutes}, "
+                f"begin={begin}, "
+                f"cash={cash:.2f}, "
+                f"open_positions={len(open_positions)}, "
+                f"opened_total={opened_total}, "
+                f"closed_total={closed_total}"
+            )
+
+        minute_by_secid = minute_data.set_index(
+            "secid",
+            drop=False,
+        )
+
+        last_minute_by_secid = minute_by_secid
+
+        increment_position_holding_steps(
+            open_positions=open_positions,
+            begin=begin,
+        )
+
+        (
+            cash,
+            open_positions,
+            closed_count,
+            max_hold_closed_count,
+            forecast_closed_count,
+        ) = try_close_positions(
+            begin=begin,
+            cash=cash,
+            open_positions=open_positions,
+            minute_by_secid=minute_by_secid,
+            sell_cost=sell_cost,
+            trade_events=trade_events,
+            closed_trades=closed_trades,
+        )
+
+        closed_total += closed_count
+        closed_by_max_hold += max_hold_closed_count
+        closed_by_forecast += forecast_closed_count
+
+        equity_before_open, _position_value_before_open = (
+            mark_to_market(
+                cash=cash,
+                open_positions=open_positions,
+                begin=begin,
+                minute_by_secid=minute_by_secid,
+                sell_cost=sell_cost,
+            )
+        )
+
+        cash, open_positions, opened_count = try_open_positions(
+            begin=begin,
+            final_time=final_time,
+            cash=cash,
+            open_positions=open_positions,
+            minute_data=minute_data,
+            minute_by_secid=minute_by_secid,
+            portfolio_value=equity_before_open,
+            threshold=threshold,
+            max_positions=max_positions,
+            buy_cost=buy_cost,
+            sell_cost=sell_cost,
+            trade_events=trade_events,
+        )
+
+        opened_total += opened_count
+
+        equity, position_value = mark_to_market(
+            cash=cash,
+            open_positions=open_positions,
+            begin=begin,
+            minute_by_secid=minute_by_secid,
+            sell_cost=sell_cost,
+        )
+
+        equity_history.append({
+            "begin": begin,
+            "cash": cash,
+            "position_value": position_value,
+            "equity": equity,
+            "open_positions": len(open_positions),
+        })
+
+    if open_positions:
+        if last_minute_by_secid is None:
+            raise RuntimeError(
+                "Невозможно закрыть позиции в конце периода: "
+                "нет последней minute_by_secid."
+            )
+
+        cash, open_positions = close_all_positions_at_end(
+            final_time=final_time,
+            cash=cash,
+            open_positions=open_positions,
+            minute_by_secid=last_minute_by_secid,
+            sell_cost=sell_cost,
+            trade_events=trade_events,
+            closed_trades=closed_trades,
+        )
+
+        equity_history.append({
+            "begin": final_time,
+            "cash": cash,
+            "position_value": 0.0,
+            "equity": cash,
+            "open_positions": 0,
+        })
+
+    equity_df = pd.DataFrame(equity_history)
+    trade_events_df = pd.DataFrame(trade_events)
+    closed_trades_df = pd.DataFrame(closed_trades)
+
+    metrics = calculate_backtest_metrics(
+        equity_df=equity_df,
+        trade_events_df=trade_events_df,
+        closed_trades_df=closed_trades_df,
+        initial_cash=initial_cash,
+    )
+
+    log(
+        f"{name}: combo {combo_idx}/{total_combos} завершена: "
+        f"trades={metrics['trades']}, "
+        f"final_equity={metrics['final_equity']:.2f}, "
+        f"return={metrics['total_return_pct']:.4f}%, "
+        f"max_drawdown={metrics['max_drawdown_pct']:.4f}%, "
+        f"profit_factor={metrics['profit_factor']:.4f}, "
+        f"opened_total={opened_total}, "
+        f"closed_total={closed_total}, "
+        f"closed_by_max_hold={closed_by_max_hold}, "
+        f"closed_by_forecast={closed_by_forecast}"
+    )
+
+    summary_row = {
+        "_combo_idx": combo_idx,
+        "model_name": model_name,
+        "split": name,
+        "threshold_bp": threshold_bp,
+        "max_positions": max_positions,
+        "buy_cost_bp": buy_cost_bp,
+        "sell_cost_bp": sell_cost_bp,
+
+        "opened_total": opened_total,
+        "closed_total": closed_total,
+        "closed_by_max_hold_loop": closed_by_max_hold,
+        "closed_by_forecast_loop": closed_by_forecast,
+    }
+
+    summary_row.update(metrics)
+
+    save_backtest_details(
+        split=name,
+        threshold_bp=threshold_bp,
+        max_positions=max_positions,
+        buy_cost_bp=buy_cost_bp,
+        sell_cost_bp=sell_cost_bp,
+        trade_events_df=trade_events_df,
+        closed_trades_df=closed_trades_df,
+        equity_df=equity_df,
+        save_details=save_details,
+        results_dir=results_dir,
+        model_name=model_name,
+    )
+
+    return summary_row
+
+
 def run_stateful_portfolio_backtest(
         name: str,
         data: pd.DataFrame,
@@ -1358,6 +1672,9 @@ def run_stateful_portfolio_backtest(
 ) -> pd.DataFrame:
     """
     Выполняет историческое тестирование stateful long-only стратегии.
+
+    Если BACKTEST_N_JOBS > 1, разные комбинации threshold/max_positions/cost
+    выполняются параллельно.
     """
     log(f"Запускаю backtest для split={name}")
 
@@ -1374,7 +1691,6 @@ def run_stateful_portfolio_backtest(
 
     work = data[work_cols].copy()
 
-    grouped_by_minute = work.groupby("begin", sort=False)
     unique_minutes = work["begin"].nunique()
     final_time = work["begin"].iloc[-1]
 
@@ -1382,216 +1698,92 @@ def run_stateful_portfolio_backtest(
     log(f"{name}: уникальных минут={unique_minutes}")
     log(f"{name}: final_time={final_time}")
     log(f"{name}: комбинаций параметров={len(parameter_grid)}")
+    log(
+        f"{name}: BACKTEST_N_JOBS={BACKTEST_N_JOBS}, "
+        f"BACKTEST_PARALLEL_BACKEND={BACKTEST_PARALLEL_BACKEND}"
+    )
 
-    summary_rows = []
+    summary_rows: list[dict[str, Any]] = []
+    total_combos = len(parameter_grid)
 
-    for combo_idx, params in enumerate(parameter_grid, start=1):
-        threshold_bp = float(params["threshold_bp"])
-        max_positions = int(params["max_positions"])
-        buy_cost_bp = float(params["buy_cost_bp"])
-        sell_cost_bp = float(params["sell_cost_bp"])
+    if BACKTEST_N_JOBS <= 1 or total_combos <= 1:
+        for combo_idx, params in enumerate(parameter_grid, start=1):
+            summary_rows.append(run_single_parameter_combo(
+                work=work,
+                name=name,
+                params=params,
+                combo_idx=combo_idx,
+                total_combos=total_combos,
+                progress_every_minutes=progress_every_minutes,
+                save_details=save_details,
+                model_name=model_name,
+                results_dir=results_dir,
+                initial_cash=initial_cash,
+            ))
+    else:
+        max_workers = min(int(BACKTEST_N_JOBS), total_combos)
 
-        threshold = bp_to_return(threshold_bp)
-        buy_cost = bp_to_return(buy_cost_bp)
-        sell_cost = bp_to_return(sell_cost_bp)
-
-        log(
-            f"{name}: combo {combo_idx}/{len(parameter_grid)}: "
-            f"threshold={threshold_bp}bp, "
-            f"max_positions={max_positions}, "
-            f"buy_cost={buy_cost_bp}bp, "
-            f"sell_cost={sell_cost_bp}bp"
-        )
-
-        cash = initial_cash
-        open_positions = []
-
-        equity_history = []
-        trade_events = []
-        closed_trades = []
-
-        last_minute_by_secid: pd.DataFrame | None = None
-
-        opened_total = 0
-        closed_total = 0
-        closed_by_max_hold = 0
-        closed_by_forecast = 0
-
-        minute_idx = 0
-
-        for begin, minute_data in grouped_by_minute:
-            minute_idx += 1
-
-            if (
-                    minute_idx == 1
-                    or minute_idx % progress_every_minutes == 0
-                    or minute_idx == unique_minutes
-            ):
-                log(
-                    f"{name}: combo {combo_idx}/{len(parameter_grid)}, "
-                    f"minute {minute_idx}/{unique_minutes}, "
-                    f"begin={begin}, "
-                    f"cash={cash:.2f}, "
-                    f"open_positions={len(open_positions)}, "
-                    f"opened_total={opened_total}, "
-                    f"closed_total={closed_total}"
-                )
-
-            minute_by_secid = minute_data.set_index(
-                "secid",
-                drop=False,
-            )
-
-            last_minute_by_secid = minute_by_secid
-
-            increment_position_holding_steps(
-                open_positions=open_positions,
-                begin=begin,
-            )
-
-            (
-                cash,
-                open_positions,
-                closed_count,
-                max_hold_closed_count,
-                forecast_closed_count,
-            ) = try_close_positions(
-                begin=begin,
-                cash=cash,
-                open_positions=open_positions,
-                minute_by_secid=minute_by_secid,
-                sell_cost=sell_cost,
-                trade_events=trade_events,
-                closed_trades=closed_trades,
-            )
-
-            closed_total += closed_count
-            closed_by_max_hold += max_hold_closed_count
-            closed_by_forecast += forecast_closed_count
-
-            equity_before_open, _position_value_before_open = (
-                mark_to_market(
-                    cash=cash,
-                    open_positions=open_positions,
-                    begin=begin,
-                    minute_by_secid=minute_by_secid,
-                    sell_cost=sell_cost,
-                )
-            )
-
-            cash, open_positions, opened_count = try_open_positions(
-                begin=begin,
-                final_time=final_time,
-                cash=cash,
-                open_positions=open_positions,
-                minute_data=minute_data,
-                minute_by_secid=minute_by_secid,
-                portfolio_value=equity_before_open,
-                threshold=threshold,
-                max_positions=max_positions,
-                buy_cost=buy_cost,
-                sell_cost=sell_cost,
-                trade_events=trade_events,
-            )
-
-            opened_total += opened_count
-
-            equity, position_value = mark_to_market(
-                cash=cash,
-                open_positions=open_positions,
-                begin=begin,
-                minute_by_secid=minute_by_secid,
-                sell_cost=sell_cost,
-            )
-
-            equity_history.append({
-                "begin": begin,
-                "cash": cash,
-                "position_value": position_value,
-                "equity": equity,
-                "open_positions": len(open_positions),
-            })
-
-        if open_positions:
-            if last_minute_by_secid is None:
-                raise RuntimeError(
-                    "Невозможно закрыть позиции в конце периода: "
-                    "нет последней minute_by_secid."
-                )
-
-            cash, open_positions = close_all_positions_at_end(
-                final_time=final_time,
-                cash=cash,
-                open_positions=open_positions,
-                minute_by_secid=last_minute_by_secid,
-                sell_cost=sell_cost,
-                trade_events=trade_events,
-                closed_trades=closed_trades,
-            )
-
-            equity_history.append({
-                "begin": final_time,
-                "cash": cash,
-                "position_value": 0.0,
-                "equity": cash,
-                "open_positions": 0,
-            })
-
-        equity_df = pd.DataFrame(equity_history)
-        trade_events_df = pd.DataFrame(trade_events)
-        closed_trades_df = pd.DataFrame(closed_trades)
-
-        metrics = calculate_backtest_metrics(
-            equity_df=equity_df,
-            trade_events_df=trade_events_df,
-            closed_trades_df=closed_trades_df,
-            initial_cash=initial_cash,
-        )
+        task_kwargs = [
+            {
+                "name": name,
+                "params": params,
+                "combo_idx": combo_idx,
+                "total_combos": total_combos,
+                "progress_every_minutes": progress_every_minutes,
+                "save_details": save_details,
+                "model_name": model_name,
+                "results_dir": results_dir,
+                "initial_cash": initial_cash,
+            }
+            for combo_idx, params in enumerate(parameter_grid, start=1)
+        ]
 
         log(
-            f"{name}: combo {combo_idx}/{len(parameter_grid)} завершена: "
-            f"trades={metrics['trades']}, "
-            f"final_equity={metrics['final_equity']:.2f}, "
-            f"return={metrics['total_return_pct']:.4f}%, "
-            f"max_drawdown={metrics['max_drawdown_pct']:.4f}%, "
-            f"profit_factor={metrics['profit_factor']:.4f}, "
-            f"opened_total={opened_total}, "
-            f"closed_total={closed_total}, "
-            f"closed_by_max_hold={closed_by_max_hold}, "
-            f"closed_by_forecast={closed_by_forecast}"
+            f"{name}: запускаю параллельный backtest: "
+            f"workers={max_workers}, backend={BACKTEST_PARALLEL_BACKEND}"
         )
 
-        summary_row = {
-            "model_name": model_name,
-            "split": name,
-            "threshold_bp": threshold_bp,
-            "max_positions": max_positions,
-            "buy_cost_bp": buy_cost_bp,
-            "sell_cost_bp": sell_cost_bp,
+        if BACKTEST_PARALLEL_BACKEND == "thread":
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [
+                    executor.submit(
+                        run_single_parameter_combo,
+                        work=work,
+                        **kwargs,
+                    )
+                    for kwargs in task_kwargs
+                ]
 
-            "opened_total": opened_total,
-            "closed_total": closed_total,
-            "closed_by_max_hold_loop": closed_by_max_hold,
-            "closed_by_forecast_loop": closed_by_forecast,
-        }
+                for future in as_completed(futures):
+                    summary_rows.append(future.result())
 
-        summary_row.update(metrics)
+        elif BACKTEST_PARALLEL_BACKEND == "process":
+            with ProcessPoolExecutor(
+                    max_workers=max_workers,
+                    initializer=_init_parallel_backtest_worker,
+                    initargs=(work,),
+            ) as executor:
+                futures = [
+                    executor.submit(
+                        _run_single_parameter_combo_from_global,
+                        kwargs,
+                    )
+                    for kwargs in task_kwargs
+                ]
 
-        summary_rows.append(summary_row)
+                for future in as_completed(futures):
+                    summary_rows.append(future.result())
 
-        save_backtest_details(
-            split=name,
-            threshold_bp=threshold_bp,
-            max_positions=max_positions,
-            buy_cost_bp=buy_cost_bp,
-            sell_cost_bp=sell_cost_bp,
-            trade_events_df=trade_events_df,
-            closed_trades_df=closed_trades_df,
-            equity_df=equity_df,
-            save_details=save_details,
-            results_dir=results_dir,
-            model_name=model_name,
-        )
+        else:
+            raise ValueError(
+                "BACKTEST_PARALLEL_BACKEND должен быть 'process' или 'thread', "
+                f"получено: {BACKTEST_PARALLEL_BACKEND!r}"
+            )
+
+    summary_rows = sorted(summary_rows, key=lambda row: row["_combo_idx"])
+
+    for row in summary_rows:
+        row.pop("_combo_idx", None)
 
     summary = pd.DataFrame(summary_rows)
 
@@ -1607,7 +1799,6 @@ def run_stateful_portfolio_backtest(
         safe_print(summary.to_string(index=False))
 
     return summary
-
 
 def select_best_validation_config(
         valid_summary: pd.DataFrame,
@@ -2210,16 +2401,6 @@ def save_best_validation_hyperparameter_files(
         encoding="utf-8",
     )
 
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-
-    (RESULTS_DIR / BEST_VALIDATION_HYPERPARAMETERS_TEXT_PATH.name).write_text(
-        text_content,
-        encoding="utf-8",
-    )
-    (RESULTS_DIR / BEST_VALIDATION_HYPERPARAMETERS_PY_PATH.name).write_text(
-        py_content,
-        encoding="utf-8",
-    )
 
     log(
         "Лучшие validation-гиперпараметры сохранены: "
@@ -2286,11 +2467,12 @@ def main() -> None:
     2. если RUN_VALIDATION_BACKTEST=True, подбирает threshold_bp и
        max_positions на validation;
     3. если validation запускалась, сохраняет лучшие параметры в
-       best_validation_hyper_parameters.py и best_validation_hyper_parameters.txt;
+       best_validation_hyperparameters.py и best_validation_hyperparameters.txt;
     4. если RUN_TEST_BACKTEST=True, прогоняет test:
        - после validation — на лучших validation-параметрах;
        - без validation — на параметрах из VALIDATION_PARAMETER_GRIDS.
     """
+    reset_log_file()
     log("Старт backtest_strategy.py")
 
     active_settings = get_active_backtest_settings()
@@ -2305,18 +2487,43 @@ def main() -> None:
     log("Grid торговых гиперпараметров: validation_hyperparameters.py")
     log("Обучение моделей в этом файле не выполняется")
     log(f"debug_max_minutes: {active_settings['debug_max_minutes']}")
+    log(f"BACKTEST_N_JOBS={BACKTEST_N_JOBS}")
+    log(f"BACKTEST_PARALLEL_BACKEND={BACKTEST_PARALLEL_BACKEND}")
+    log(f"LOG_FILE_PATH={LOG_FILE_PATH}")
 
-    if not BACKTEST_STRATEGIES:
+    available_grid_names = {
+        normalize_model_name(name)
+        for name in VALIDATION_PARAMETER_GRIDS.keys()
+    }
+
+    active_backtest_strategies = [
+        strategy
+        for strategy in BACKTEST_STRATEGIES
+        if normalize_model_name(strategy) in available_grid_names
+    ]
+
+    skipped_strategies = [
+        strategy
+        for strategy in BACKTEST_STRATEGIES
+        if normalize_model_name(strategy) not in available_grid_names
+    ]
+
+    if skipped_strategies:
+        log(
+            "Пропускаю стратегии/модели без grid в validation_hyperparameters.py: "
+            f"{skipped_strategies}"
+        )
+
+    if not active_backtest_strategies:
         raise ValueError(
-            "BACKTEST_STRATEGIES пустой. Укажи хотя бы одну стратегию/модель "
-            "в списке BACKTEST_STRATEGIES внутри backtest_strategy.py."
+            "Нет ни одной стратегии/модели с grid в validation_hyperparameters.py."
         )
 
     all_valid_summaries = []
     all_test_summaries = []
     best_parameter_grids_by_model: dict[str, list[dict[str, float | int]]] = {}
 
-    for model_name in BACKTEST_STRATEGIES:
+    for model_name in active_backtest_strategies:
         normalized_model_name = normalize_model_name(model_name)
 
         log("=" * 80)
