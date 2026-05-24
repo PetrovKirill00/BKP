@@ -1,0 +1,42 @@
+@startuml
+
+left to right direction
+
+skinparam shadowing false
+skinparam packageStyle rectangle
+skinparam usecaseBorderColor black
+skinparam usecaseBackgroundColor white
+skinparam actorStyle awesome
+skinparam ArrowFontSize 13
+
+
+actor "Программный интерфейс\nМосковской биржи" as MOEX
+actor "Разработчик" as Developer
+
+rectangle "Система алгоритмического трейдинга" {
+
+  usecase "Оценить и сравнить\nрезультаты стратегий" as UC8
+
+  usecase "Выполнить историческое\nтестирование" as UC7
+
+  usecase "Подобрать параметры\nмодуля принятия решений" as UC5
+
+  usecase "Построить прогнозы\nкраткосрочной доходности" as UC4
+
+  usecase "Сформировать признаки\nи целевые переменные" as UC3
+
+  usecase "Отфильтровать\nликвидные акции" as UC2
+
+  usecase "Получить минутные\nрыночные данные" as UC1
+}
+
+MOEX --> UC1
+
+Developer --> UC1
+Developer --> UC2
+Developer --> UC3
+Developer --> UC4
+Developer --> UC5
+Developer --> UC7
+Developer --> UC8
+@enduml

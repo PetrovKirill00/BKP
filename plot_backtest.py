@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
+from matplotlib.ticker import FuncFormatter
 
 try:
     from constants import HORIZON
@@ -85,7 +86,7 @@ CATEGORY_ORDER = ["Правиловые стратегии", "Машинное �
 
 COST_ORDER = [1.0, 3.0, 5.0]
 COST_LABELS = {1.0: "0,01%", 3.0: "0,03%", 5.0: "0,05%"}
-COST_TITLES = {1.0: "1 б.п.", 3.0: "3 б.п.", 5.0: "5 б.п."}
+COST_TITLES = {1.0: "0,01%", 3.0: "0,03%", 5.0: "0,05%"}
 
 # Более контрастная палитра.
 CONTRAST_COLORS = [
@@ -104,6 +105,13 @@ ACTIVE_CATEGORY_SELECTIONS: dict[str, list[str]] = {
     category: list(models)
     for category, models in CATEGORY_TO_MODELS.items()
 }
+
+
+def format_integer_tick(value: float, _position: int) -> str:
+    """Форматирует значения оси как обычные целые числа без научной записи."""
+    if not np.isfinite(value):
+        return ""
+    return f"{int(round(value)):,}".replace(",", " ")
 
 
 # ============================================================
@@ -579,6 +587,8 @@ def plot_trade_count_curves_for_cost(
     ax.set_title(f"Накопленное количество сделок, издержки {COST_TITLES[cost_bp]}")
     ax.set_xlabel("Время")
     ax.set_ylabel("Количество закрытых сделок")
+    ax.yaxis.set_major_formatter(FuncFormatter(format_integer_tick))
+    ax.yaxis.get_offset_text().set_visible(False)
     ax.grid(True, alpha=0.3)
     handles, labels = ax.get_legend_handles_labels()
     if labels:
@@ -604,15 +614,11 @@ def save_page_1(
     plot_single_cost_bar(
         axes[1, 1],
         values=final_factors_3bp,
-        title="Итоговый фактор доходности при издержках 3 б.п.",
+        title="Итоговый фактор доходности при издержках 0.03%",
         ylabel="Финальный капитал / начальный капитал",
         baseline=1.0,
     )
 
-    fig.suptitle(
-        "Топ-2 стратегии из каждой категории по результату издержках 0.03%",
-        fontsize=14,
-    )
 
     out_path = PLOTS_DIR / "page1_equity_and_final_factor.png"
     fig.savefig(out_path, dpi=200)
@@ -635,14 +641,9 @@ def save_page_2(
     plot_single_cost_bar(
         axes[1, 1],
         values=trades_3bp,
-        title="Суммарное количество сделок при издержках 3 б.п.",
+        title="Суммарное количество сделок при издержках 0.03%",
         ylabel="Количество закрытых сделок",
         log_scale=True,
-    )
-
-    fig.suptitle(
-        "Топ-2 стратегии из каждой категории по результату при издержках 0.03%",
-        fontsize=14,
     )
 
     out_path = PLOTS_DIR / "page2_trade_counts.png"

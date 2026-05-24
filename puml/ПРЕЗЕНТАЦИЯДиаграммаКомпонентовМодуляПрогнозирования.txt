@@ -1,0 +1,64 @@
+@startuml
+left to right direction
+
+skinparam componentStyle rectangle
+skinparam packageStyle rectangle
+skinparam shadowing false
+skinparam wrapWidth 180
+skinparam maxMessageSize 120
+
+component "Единый набор\nпризнаков X_t" as Features
+
+note bottom of Features
+В состав признаков входят:
+- OHLCV
+- денежный оборот
+- лаги доходности
+- скользящие средние
+- логарифмы объёма и оборота
+- признаки волатильности
+- временные признаки
+- окна прошлых наблюдений
+end note
+
+package "Модуль прогнозирования" as ForecastModule {
+
+    component "Стратегии\nна основе правил" as RuleBased
+
+    component "Модели машинного\nобучения\n(CatBoost, Random Forest,\nRidge)" as MLModels
+
+    component "Нейросетевые\nмодели\n(GRU, LSTM, TCN,\nTransformer)" as NNModels
+
+    component "Формирование\nпрогнозов" as ForecastOutput
+}
+
+component "Прогноз для входа\nв позицию" as EntryForecast
+component "Прогноз для удержания\nпозиции" as HoldForecast
+
+component "Модуль принятия\nторговых решений" as DecisionModule
+
+Features --> RuleBased : признаки X_t
+Features --> MLModels : признаки X_t
+Features --> NNModels : признаки X_t
+
+RuleBased --> ForecastOutput
+MLModels --> ForecastOutput
+NNModels --> ForecastOutput
+
+ForecastOutput --> EntryForecast : ожидаемая доходность\nдля открытия позиции
+ForecastOutput --> HoldForecast : ожидаемая доходность\nдля продолжения удержания
+
+EntryForecast --> DecisionModule
+HoldForecast --> DecisionModule
+
+note right of EntryForecast
+Используется при проверке
+возможности покупки новой бумаги
+end note
+
+note right of HoldForecast
+Используется при проверке
+уже открытой позиции
+end note
+
+@enduml
